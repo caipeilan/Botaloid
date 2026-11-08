@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>外观 · Botaloid</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <link rel="stylesheet" href="/assets/theme.css">
+  <link rel="stylesheet" href="/assets/controls.css">
+  <script src="/assets/appearance.js" type="module"></script>
+  <script src="/assets/navigation.js" type="module"></script>
+  <script src="/assets/controls.js" type="module"></script>
+</head>
+<body class="admin-page">
+  <header class="admin-header">
+    <span class="admin-brand">Botaloid</span>
+    <a href="/" class="back-link"><svg aria-hidden="true"><use href="/assets/icons.svg#back"></use></svg>返回聊天</a>
+  </header>
+  <nav class="settings-tabs" aria-label="设置">
+    <a href="/settings">曲库管理</a>
+    <a href="/settings/model">模型设置</a>
+    <a href="/settings/appearance" aria-current="page">外观</a>
+  </nav>
+  <main class="admin-main editor appearance-settings">
+    <h1>外观</h1>
+    <label for="interface-font">字体
+      <select id="interface-font"><option value="xiaolai">小赖等宽</option><option value="system">系统默认</option></select>
+    </label>
+    <div class="font-preview"><p>你好，Botaloid。</p><p>ハロ ハワユ</p><p>ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789</p></div>
+    <p id="font-status" class="notice" role="status" hidden></p>
+  </main>
+</body>
+</html>

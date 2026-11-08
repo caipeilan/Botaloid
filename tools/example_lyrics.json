@@ -1,0 +1,16 @@
+[
+  {
+    "title": "我是示例",
+    "author": "自写示例",
+    "enabled": true,
+    "lyrics": ["哈基米哦南北绿豆", "阿西嘎哈压库奶龙"]
+  },
+  {
+    "title": "我也是示例",
+    "author": "自写示例",
+    "lyrics": [
+      {"text": "一段一段带一段", "stanza": 0, "fallback": true},
+      {"text": "冰冰冰", "stanza": 1, "translation": "Bing Bing Bing"}
+    ]
+  }
+]

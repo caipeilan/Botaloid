@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+build/
+dist/
+*.egg-info/
+*.sqlite3
+*.sqlite3-*
+.env
+.env.*
+!.env.example
+*.log
+model-settings.json
+/data/
+/docs/workflow-test-*.md

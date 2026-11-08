@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>曲库管理 · Botaloid</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <link rel="stylesheet" href="/assets/theme.css">
+  <link rel="stylesheet" href="/assets/controls.css">
+  <script src="/assets/appearance.js" type="module"></script>
+  <script src="/assets/navigation.js" type="module"></script>
+  <script src="/assets/controls.js" type="module"></script>
+  <script src="/assets/admin.js" type="module"></script>
+</head>
+<body class="admin-page">
+  <header class="admin-header">
+    <span class="admin-brand">Botaloid</span>
+    <a href="/" class="back-link"><svg aria-hidden="true"><use href="/assets/icons.svg#back"></use></svg>返回聊天</a>
+  </header>
+  <nav class="settings-tabs" aria-label="设置">
+    <a href="/settings" aria-current="page">曲库管理</a>
+    <a href="/settings/model">模型设置</a>
+    <a href="/settings/appearance">外观</a>
+  </nav>
+  <main class="admin-main">
+    <section id="library" aria-labelledby="library-title">
+      <div class="page-heading">
+        <h1 id="library-title">曲库管理</h1>
+        <div class="actions">
+          <button id="import" class="button" type="button"><svg aria-hidden="true"><use href="/assets/icons.svg#import"></use></svg>导入 JSON</button>
+          <input id="file" type="file" accept="application/json,.json" hidden>
+          <button id="add" class="button primary" type="button"><svg aria-hidden="true"><use href="/assets/icons.svg#plus"></use></svg>新增歌曲</button>
+        </div>
+      </div>
+      <div class="library-toolbar">
+        <label class="search">
+          <svg aria-hidden="true"><use href="/assets/icons.svg#search"></use></svg>
+          <span class="sr-only">搜索曲名或作者</span>
+          <input id="search" type="search" maxlength="300" placeholder="搜索曲名或作者">
+        </label>
+        <label>
+          <span class="sr-only">启用状态</span>
+          <select id="filter">
+            <option value="all">全部状态</option>
+            <option value="enabled">已启用</option>
+            <option value="disabled">已停用</option>
+          </select>
+        </label>
+      </div>
+      <p id="library-status" class="notice" role="status" hidden></p>
+      <div class="table-frame"><table>
+        <thead><tr><th scope="col">曲名</th><th scope="col" class="author-column">作者</th><th scope="col" class="state-column">状态</th><th scope="col" class="row-actions"><span class="sr-only">操作</span></th></tr></thead>
+        <tbody id="songs"></tbody>
+      </table></div>
+      <div class="pagination">
+        <span id="total"></span>
+        <div class="page-controls">
+          <button id="prev" class="icon-button" type="button" aria-label="上一页" disabled><svg aria-hidden="true"><use href="/assets/icons.svg#left"></use></svg></button>
+          <span id="page-number" aria-live="polite"></span>
+          <button id="next" class="icon-button" type="button" aria-label="下一页" disabled><svg aria-hidden="true"><use href="/assets/icons.svg#right"></use></svg></button>
+        </div>
+      </div>
+    </section>
+    <section id="editor" class="editor" aria-labelledby="editor-title" hidden>
+      <button id="cancel" class="back-link" type="button"><svg aria-hidden="true"><use href="/assets/icons.svg#back"></use></svg>返回曲库</button>
+      <h1 id="editor-title">新增歌曲</h1>
+      <form id="song-form">
+        <div class="field-grid">
+          <label>曲名<input id="title" required maxlength="500"></label>
+          <label>作者<input id="author" required maxlength="500"></label>
+        </div>
+        <label class="checkbox"><input id="enabled" type="checkbox" checked>启用歌曲</label>
+        <label for="lyrics">歌词</label>
+        <textarea id="lyrics" class="lyric-input" rows="12" required spellcheck="false"></textarea>
+        <label class="fallback-label">兜底歌词<select id="fallback"><option value="">无</option></select></label>
+        <p id="editor-status" class="notice" role="status" hidden></p>
+        <div class="editor-actions"><button id="save" class="button primary" type="submit">保存</button></div>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

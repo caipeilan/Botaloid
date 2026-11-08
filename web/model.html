@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>模型设置 · Botaloid</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <link rel="stylesheet" href="/assets/theme.css">
+  <link rel="stylesheet" href="/assets/controls.css">
+  <script src="/assets/appearance.js" type="module"></script>
+  <script src="/assets/navigation.js" type="module"></script>
+  <script src="/assets/controls.js" type="module"></script>
+  <script src="/assets/model.js" type="module"></script>
+</head>
+<body class="admin-page">
+  <header class="admin-header">
+    <span class="admin-brand">Botaloid</span>
+    <a href="/" class="back-link"><svg aria-hidden="true"><use href="/assets/icons.svg#back"></use></svg>返回聊天</a>
+  </header>
+  <nav class="settings-tabs" aria-label="设置">
+    <a href="/settings">曲库管理</a>
+    <a href="/settings/model" aria-current="page">模型设置</a>
+    <a href="/settings/appearance">外观</a>
+  </nav>
+  <main class="admin-main editor model-settings">
+    <h1>模型设置</h1>
+    <form id="model-form">
+      <fieldset id="model-fields" disabled>
+        <label for="provider">运行环境</label>
+        <select id="provider">
+          <option value="ollama">Ollama（原生接口）</option>
+          <option value="api">OpenAI 兼容接口</option>
+        </select>
+        <label for="model-url">接口地址</label>
+        <input id="model-url" type="url" maxlength="2048" autocomplete="off" spellcheck="false" required>
+        <label for="model-name">模型名称</label>
+        <input id="model-name" maxlength="256" autocomplete="off" spellcheck="false" required>
+        <div id="local-models" class="local-models">
+          <button id="load-models" class="button" type="button">读取模型列表</button>
+          <label for="installed-models" class="sr-only">可用模型</label>
+          <select id="installed-models" hidden></select>
+        </div>
+        <div id="api-key-fields" hidden>
+          <label for="api-key">API Key</label>
+          <input id="api-key" type="password" maxlength="2048" autocomplete="new-password" spellcheck="false">
+          <label id="clear-key-label" class="checkbox" hidden><input id="clear-key" type="checkbox">移除已保存的密钥</label>
+        </div>
+        <fieldset id="language-fields">
+          <legend>曲库语言</legend>
+          <label for="original-languages">原文语言</label>
+          <input id="original-languages" maxlength="1000" autocomplete="off" spellcheck="false" placeholder="日语, 英语">
+          <label for="translation-languages">翻译语言</label>
+          <input id="translation-languages" maxlength="1000" autocomplete="off" spellcheck="false" placeholder="中文, 英语">
+        </fieldset>
+        <details id="advanced-params">
+          <summary>高级参数</summary>
+          <div class="field-grid">
+            <label for="temperature">温度<input id="temperature" type="number" min="0" max="2" step="0.05" placeholder="规划 0.2 / 选句 0.55"></label>
+            <label for="max-tokens">最大输出 token<input id="max-tokens" type="number" min="1" max="8192" step="1" placeholder="留空使用默认"></label>
+            <label for="timeout">读取超时（秒）<input id="timeout" type="number" min="5" max="600" step="1" placeholder="75"></label>
+            <label id="num-ctx-field" for="num-ctx">上下文长度<input id="num-ctx" type="number" min="512" max="131072" step="512" placeholder="8192"></label>
+          </div>
+          <label id="think-field" class="checkbox"><input id="think" type="checkbox">允许模型先思考再作答</label>
+          <label id="json-mode-field" class="checkbox"><input id="json-mode" type="checkbox">请求 JSON 模式</label>
+        </details>
+      </fieldset>
+      <p id="model-status" class="notice" role="status">正在读取设置…</p>
+      <div class="editor-actions model-actions">
+        <button id="test-model" class="button" type="button" disabled>测试连接</button>
+        <button id="save-model" class="button primary" type="submit" disabled>保存并使用</button>
+      </div>
+    </form>
+  </main>
+</body>
+</html>

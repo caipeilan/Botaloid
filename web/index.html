@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Botaloid</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <link rel="stylesheet" href="/assets/theme.css">
+  <link rel="stylesheet" href="/assets/controls.css">
+  <script src="/assets/appearance.js" type="module"></script>
+  <script src="/assets/controls.js" type="module"></script>
+  <script src="/assets/chat.js" type="module"></script>
+</head>
+<body class="chat-page">
+  <button id="scrim" class="scrim" type="button" aria-label="关闭会话列表" tabindex="-1" hidden></button>
+  <aside id="sidebar" class="sidebar" aria-label="会话列表">
+    <div class="brand">
+      <span class="brand-icon"><img src="/assets/brand-logo.svg" alt=""></span>
+      <span>Botaloid</span>
+      <button id="close-sidebar" class="icon-button drawer-close" type="button" aria-label="关闭会话列表"><svg aria-hidden="true"><use href="/assets/icons.svg#close"></use></svg></button>
+    </div>
+    <button id="new-chat" class="new-chat" type="button"><svg aria-hidden="true"><use href="/assets/icons.svg#plus"></use></svg>新对话</button>
+    <nav id="threads" class="threads" aria-label="历史对话"></nav>
+    <a id="settings-link" class="side-link" href="/settings" hidden><svg aria-hidden="true"><use href="/assets/icons.svg#settings"></use></svg>设置</a>
+  </aside>
+  <main class="chat-main">
+    <header class="chat-header">
+      <button id="open-sidebar" class="icon-button drawer-toggle" type="button" aria-label="打开会话列表" aria-controls="sidebar" aria-expanded="false"><svg aria-hidden="true"><use href="/assets/icons.svg#menu"></use></svg></button>
+      <span id="thread-title" class="thread-title">新对话</span>
+      <button id="mobile-new" class="icon-button mobile-new" type="button" aria-label="新对话"><svg aria-hidden="true"><use href="/assets/icons.svg#compose"></use></svg></button>
+    </header>
+    <div id="chat-stage" class="chat-stage is-empty">
+      <div id="scroll-area" class="scroll-area">
+        <div id="welcome" class="welcome">
+          <img src="/assets/bot-avatar.svg" alt="" width="64" height="64">
+          <h1 id="welcome-lyric"></h1>
+          <p id="welcome-credit" class="credit"></p>
+        </div>
+        <div id="messages" class="messages" role="log" aria-label="对话" aria-live="polite"></div>
+      </div>
+      <div class="compose-area">
+        <p id="chat-status" class="notice chat-notice" role="status" hidden></p>
+        <form id="composer" class="composer">
+          <label for="message" class="sr-only">消息</label>
+          <textarea id="message" rows="1" maxlength="1000" placeholder="输入消息…" required></textarea>
+          <button id="send" class="icon-button send-button" type="submit" aria-label="发送" disabled>
+            <svg aria-hidden="true"><use href="/assets/icons.svg#up"></use></svg>
+          </button>
+        </form>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>界面样例 · Botaloid</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <link rel="stylesheet" href="/assets/theme.css">
+  <link rel="stylesheet" href="/assets/controls.css">
+  <script src="/assets/appearance.js" type="module"></script>
+  <script src="/assets/controls.js" type="module"></script>
+  <script src="/assets/preview.js" type="module"></script>
+</head>
+<body class="chat-page preview-page">
+  <button id="scrim" class="scrim" type="button" aria-label="关闭会话列表" tabindex="-1" hidden></button>
+  <aside id="sidebar" class="sidebar" aria-label="会话列表">
+    <a class="brand" href="#chat">
+      <span class="brand-icon"><img src="/assets/brand-logo.svg" alt=""></span>
+      <span>Botaloid</span>
+    </a>
+    <button id="close-sidebar" class="icon-button drawer-close" type="button" aria-label="关闭会话列表"><svg aria-hidden="true"><use href="/assets/icons.svg#close"></use></svg></button>
+    <button id="new-chat" class="new-chat" type="button"><svg aria-hidden="true"><use href="/assets/icons.svg#plus"></use></svg>新对话</button>
+    <nav id="threads" class="threads" aria-label="历史对话"></nav>
+    <a id="settings-link" class="side-link" href="#library"><svg aria-hidden="true"><use href="/assets/icons.svg#settings"></use></svg>设置</a>
+  </aside>
+  <main id="main" class="chat-main">
+    <header class="chat-header">
+      <button id="open-sidebar" class="icon-button drawer-toggle" type="button" aria-label="打开会话列表" aria-controls="sidebar" aria-expanded="false"><svg aria-hidden="true"><use href="/assets/icons.svg#menu"></use></svg></button>
+      <span id="page-title" class="thread-title">你好，Botaloid</span>
+      <span class="preview-label">界面样例</span>
+      <button id="mobile-new" class="icon-button mobile-new" type="button" aria-label="新对话"><svg aria-hidden="true"><use href="/assets/icons.svg#compose"></use></svg></button>
+    </header>
+    <section id="chat-view" class="chat-stage" aria-label="聊天">
+      <div id="scroll-area" class="scroll-area">
+        <div id="welcome" class="welcome" hidden>
+          <img src="/assets/bot-avatar.svg" alt="" width="64" height="64">
+          <h1 id="welcome-lyric"></h1>
+          <p id="welcome-credit" class="credit"></p>
+        </div>
+        <div id="messages" class="messages" role="log" aria-label="对话" aria-live="polite"></div>
+      </div>
+      <div class="compose-area">
+        <form id="composer" class="composer">
+          <label for="message" class="sr-only">消息</label>
+          <textarea id="message" rows="1" maxlength="1000" placeholder="输入消息…" required></textarea>
+          <button id="send" class="icon-button send-button" type="submit" aria-label="发送" disabled><svg aria-hidden="true"><use href="/assets/icons.svg#up"></use></svg></button>
+        </form>
+      </div>
+    </section>
+    <section id="settings-view" class="settings-view" aria-label="设置" hidden>
+      <nav class="settings-tabs" aria-label="设置">
+        <a id="library-tab" href="#library">曲库管理</a>
+        <a id="model-tab" href="#model">模型设置</a>
+        <a id="appearance-tab" href="#appearance">外观</a>
+      </nav>
+      <div class="settings-scroll">
+        <section id="library" class="admin-main" aria-labelledby="library-title">
+          <div class="page-heading">
+            <h1 id="library-title">曲库管理</h1>
+            <div class="actions">
+              <button id="import" class="button" type="button"><svg aria-hidden="true"><use href="/assets/icons.svg#import"></use></svg>导入 JSON</button>
+              <button id="add" class="button primary" type="button"><svg aria-hidden="true"><use href="/assets/icons.svg#plus"></use></svg>新增歌曲</button>
+            </div>
+          </div>
+          <div class="library-toolbar">
+            <label class="search"><svg aria-hidden="true"><use href="/assets/icons.svg#search"></use></svg><span class="sr-only">搜索曲名或作者</span><input id="search" type="search" placeholder="搜索曲名或作者"></label>
+            <label><span class="sr-only">启用状态</span><select id="filter"><option value="all">全部状态</option><option value="enabled">已启用</option><option value="disabled">已停用</option></select></label>
+          </div>
+          <p id="library-status" class="notice" role="status" hidden></p>
+          <div class="table-frame">
+            <table>
+              <thead><tr><th scope="col">曲名</th><th scope="col" class="author-column">作者</th><th scope="col" class="state-column">状态</th><th scope="col" class="row-actions"><span class="sr-only">操作</span></th></tr></thead>
+              <tbody id="songs"></tbody>
+            </table>
+          </div>
+          <div class="pagination"><span id="total"></span><span>1 / 1</span></div>
+        </section>
+        <section id="editor" class="admin-main editor" aria-labelledby="editor-title" hidden>
+          <button id="cancel" class="back-link" type="button"><svg aria-hidden="true"><use href="/assets/icons.svg#back"></use></svg>返回曲库</button>
+          <h1 id="editor-title">新增歌曲</h1>
+          <form id="song-form">
+            <div class="field-grid"><label>曲名<input id="title" maxlength="500" required></label><label>作者<input id="author" maxlength="500" required></label></div>
+            <label class="checkbox"><input id="enabled" type="checkbox" checked>启用歌曲</label>
+            <label for="lyrics">歌词</label>
+            <textarea id="lyrics" class="lyric-input" rows="10" spellcheck="false" required></textarea>
+            <div class="editor-actions"><button class="button primary" type="submit">保存</button></div>
+          </form>
+        </section>
+        <section id="model" class="admin-main editor model-settings" aria-labelledby="model-title" hidden>
+          <h1 id="model-title">模型设置</h1>
+          <form id="model-form">
+            <fieldset>
+              <label for="provider">运行环境</label>
+              <select id="provider"><option value="api">远程 API</option><option value="ollama">本地 Ollama</option></select>
+              <label for="model-url">接口地址</label>
+              <input id="model-url" type="url" value="https://api.deepseek.com" autocomplete="off" spellcheck="false" required>
+              <label for="model-name">模型名称</label>
+              <input id="model-name" value="deepseek-flash" autocomplete="off" spellcheck="false" required>
+              <div id="api-key-fields"><label for="api-key">API Key</label><input id="api-key" type="password" placeholder="输入 API Key" autocomplete="new-password" spellcheck="false"></div>
+              <div id="local-models" class="local-models" hidden><button id="load-models" class="button" type="button">读取已安装模型</button></div>
+            </fieldset>
+            <p id="model-status" class="notice" role="status" hidden></p>
+            <div class="editor-actions model-actions"><button id="test-model" class="button" type="button">测试连接</button><button class="button primary" type="submit">保存并使用</button></div>
+          </form>
+        </section>
+        <section id="appearance" class="admin-main editor appearance-settings" aria-labelledby="appearance-title" hidden>
+          <h1 id="appearance-title">外观</h1>
+          <label for="interface-font">字体<select id="interface-font"><option value="xiaolai">小赖等宽</option><option value="system">系统默认</option></select></label>
+          <div class="font-preview"><p>你好，Botaloid。</p><p>ハロ ハワユ</p><p>ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789</p></div>
+          <p id="font-status" class="notice" role="status" hidden></p>
+        </section>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
