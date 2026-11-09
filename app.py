@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager, closing
+import ipaddress
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -87,14 +88,61 @@ def send(payload: ChatInput):
         raise HTTPException(503, str(error)) from error
 
 
+DEFAULT_ADMIN_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "0.0.0.0", "::"})
+
+
+def admin_hosts():
+    hosts = set(DEFAULT_ADMIN_HOSTS)
+    for value in (settings.environment_value("ADMIN_HOSTS", "") or "").split(","):
+        value = value.strip().casefold().rstrip(".")
+        if value.startswith("[") and value.endswith("]"):
+            value = value[1:-1]
+        if value:
+            hosts.add(value)
+    return hosts
+
+
+def admin_networks():
+    networks = []
+    for value in (settings.environment_value("ADMIN_NETWORKS", "") or "").split(","):
+        value = value.strip()
+        if not value:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(value, strict=False))
+        except ValueError:
+            continue
+    return networks
+
+
+def allowed_client(host):
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if address.version == 6 and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    if address.is_loopback:
+        return True
+    return any(address in network for network in admin_networks()
+               if network.version == address.version)
+
+
 def local_request(request):
-    return (request.client is not None and request.client.host in {"127.0.0.1", "::1"}
-            and request.url.hostname in {"127.0.0.1", "::1", "localhost"})
+    if request.client is None or not allowed_client(request.client.host):
+        return False
+    try:
+        host = request.url.hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+    return host.casefold().rstrip(".") in admin_hosts()
 
 
 def require_local(request: Request):
     if not local_request(request):
-        raise HTTPException(404, "页面不存在。")
+        raise HTTPException(403, "管理页面仅允许从受信任的网络访问。")
     if request.method in {"POST", "PUT", "PATCH"}:
         origin = request.headers.get("origin")
         if origin and origin != f"{request.url.scheme}://{request.url.netloc}":
@@ -155,19 +203,69 @@ def test_model_settings(payload: settings.Draft):
     return {"ok": True}
 
 
-@admin.get("/api/model-settings/models")
-def available_models(provider: settings.Provider, url: Annotated[str, Query(max_length=2048)]):
-    target = settings.models_url(provider, url)
-    headers = settings.models_headers(provider, url)
+def upstream_error(response):
+    try:
+        data = response.json()
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    error = data.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+    elif isinstance(error, str):
+        message = error
+    else:
+        message = data.get("message") or data.get("detail")
+    if not isinstance(message, str):
+        return ""
+    return " ".join(message.split())[:200]
+
+
+def model_list_error(response):
+    status = response.status_code
+    if 300 <= status < 400:
+        detail = "模型列表地址发生重定向，请直接填写最终地址。"
+    elif status == 401:
+        detail = "模型服务需要 API Key，请在表单中填写后重试。"
+    elif status == 403:
+        detail = "模型服务拒绝访问，请检查 API Key 和权限。"
+    elif status == 404:
+        detail = "找不到模型列表地址，请检查接口地址。"
+    elif status == 429:
+        detail = "模型服务限流，请稍后重试。"
+    elif 500 <= status < 600:
+        detail = f"模型服务暂时不可用（HTTP {status}）。"
+    else:
+        detail = f"模型接口返回 HTTP {status}。"
+    message = upstream_error(response)
+    return detail + (" " + message if message else "")
+
+
+@admin.post("/api/model-settings/models")
+def available_models(payload: settings.ModelListInput):
+    provider = payload.provider
+    target = settings.models_url(provider, payload.url)
+    headers = settings.models_headers(provider, payload.url, payload.api_key,
+                                      clear_key=payload.clear_key)
     try:
         response = requests.get(target, headers=headers, timeout=(4, 6), allow_redirects=False)
-        if response.status_code != 200:
-            raise ValueError("unexpected model list response")
-        entries = response.json()["models" if provider == "ollama" else "data"]
+    except requests.Timeout as error:
+        raise HTTPException(502, "读取模型列表超时。") from error
+    except requests.RequestException as error:
+        raise HTTPException(502, "无法连接模型服务，请检查地址和运行状态。") from error
+    if response.status_code != 200:
+        raise HTTPException(502, model_list_error(response))
+    try:
+        data = response.json()
+        entries = data["models" if provider == "ollama" else "data"]
+        if not isinstance(entries, list):
+            raise TypeError("invalid model list")
         field = "name" if provider == "ollama" else "id"
-        models = sorted({item[field] for item in entries if isinstance(item.get(field), str)})
-    except (requests.RequestException, KeyError, ValueError, TypeError, AttributeError) as error:
-        raise HTTPException(502, "无法读取模型列表，请检查地址和运行状态。") from error
+        models = sorted({item[field] for item in entries
+                         if isinstance(item, dict) and isinstance(item.get(field), str)})
+    except (KeyError, ValueError, TypeError, AttributeError) as error:
+        raise HTTPException(502, "模型列表返回格式不兼容。") from error
     return {"models": models}
 
 

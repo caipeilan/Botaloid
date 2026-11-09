@@ -326,12 +326,27 @@ def quote_options(candidates, groups, tracks):
     return quotes
 
 
+def integer_value(value):
+    if type(value) is int:
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
 def select_choices(value, candidates, limit):
     result, used = [], set()
     for choice in value if isinstance(value, list) else []:
-        candidate_id, count = (choice.get("id"), choice.get("count")) if isinstance(choice, dict) else (choice, 1)
-        if type(candidate_id) is not int or not 1 <= candidate_id <= len(candidates) or type(count) is not int:
+        if isinstance(choice, dict):
+            candidate_id = integer_value(choice.get("id"))
+            count = integer_value(choice.get("count"))
+        else:
+            candidate_id, count = integer_value(choice), 1
+        if candidate_id is None or not 1 <= candidate_id <= len(candidates):
             continue
+        count = 1 if count is None else count
         quote = candidates[candidate_id - 1]
         if quote.song_id not in used:
             result.append(Quote(quote.song_id, quote.start,

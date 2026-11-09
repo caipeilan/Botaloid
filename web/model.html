@@ -61,6 +61,16 @@
             <label id="num-ctx-field" for="num-ctx">上下文长度<input id="num-ctx" type="number" min="512" max="131072" step="512" placeholder="8192"></label>
           </div>
           <label id="think-field" class="checkbox"><input id="think" type="checkbox">允许模型先思考再作答</label>
+          <label id="reasoning-effort-field" for="reasoning-effort" hidden>推理强度
+            <select id="reasoning-effort">
+              <option value="">默认（不发送）</option>
+              <option value="none">关闭</option>
+              <option value="minimal">最低</option>
+              <option value="low">低</option>
+              <option value="medium">中</option>
+              <option value="high">高</option>
+            </select>
+          </label>
           <label id="json-mode-field" class="checkbox"><input id="json-mode" type="checkbox">请求 JSON 模式</label>
         </details>
       </fieldset>

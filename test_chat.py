@@ -177,6 +177,21 @@ class ChatTests(unittest.TestCase):
         choices = chat.select_choices([{"id": 1, "count": 5}], [quote], 2)
         self.assertEqual([len(item.phrases) for item in choices], [2])
 
+    def test_selection_accepts_string_ids_and_default_count(self):
+        first = chat.Quote(7, 0, (chat.Phrase("一句", ()), chat.Phrase("二句", ())))
+        second = chat.Quote(8, 0, (chat.Phrase("三句", ()),))
+        selected = chat.select_choices(
+            [{"id": "1", "count": "2"}, {"id": 2}], [first, second], 2)
+        self.assertEqual([(item.song_id, len(item.phrases)) for item in selected],
+                         [(7, 2), (8, 1)])
+
+        selected = chat.select_choices([{"id": 1.0, "count": 2.0}], [first], 2)
+        self.assertEqual(len(selected[0].phrases), 2)
+
+        selected = chat.select_choices([{"id": "x"}, {"id": 1}], [first], 2)
+        self.assertEqual([(item.song_id, len(item.phrases)) for item in selected],
+                         [(7, 1)])
+
     def test_same_lyrics_can_find_a_song_find_a_passage_or_sing_along(self):
         lyric = "月明かりだけを頼りに遠くまで歩いていた。"
         following = "足音だけが響く。"

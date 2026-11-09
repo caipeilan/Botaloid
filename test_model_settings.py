@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -19,6 +20,7 @@ class ModelSettingsTests(unittest.TestCase):
         for mock in (
             patch.object(settings, "SETTINGS_FILE", self.path),
             patch.dict(os.environ, {}, clear=True),
+            patch.object(settings, "keyring_available", return_value=True),
             patch.object(settings.keyring, "get_password", side_effect=lambda service, ref: keys.get((service, ref))),
             patch.object(settings.keyring, "set_password", side_effect=lambda service, ref, key: keys.update({(service, ref): key})),
             patch.object(settings.keyring, "delete_password", side_effect=lambda service, ref: keys.pop((service, ref), None)),
@@ -35,6 +37,7 @@ class ModelSettingsTests(unittest.TestCase):
             "url": self.url, "model": "new-model", "has_key": True,
             "temperature": None, "max_tokens": None, "timeout": None,
             "num_ctx": None, "think": None, "json_mode": None,
+            "reasoning_effort": None,
         })
         self.assertNotIn("test-key", self.path.read_text(encoding="utf-8"))
         self.assertEqual(settings.active_connection()[2], "test-key")
@@ -99,6 +102,70 @@ class ModelSettingsTests(unittest.TestCase):
         self.assertEqual(settings.models_url("ollama", "http://127.0.0.1:11434"),
                          "http://127.0.0.1:11434/api/tags")
 
+    def test_models_headers_use_draft_key_and_saved_fallback(self):
+        settings.save_settings(settings.Draft(
+            provider="api", url=self.url, model="model", api_key="saved-key"))
+        self.assertEqual(settings.models_headers("api", self.url),
+                         {"Authorization": "Bearer saved-key"})
+        self.assertEqual(settings.models_headers("api", self.url, "draft-key"),
+                         {"Authorization": "Bearer draft-key"})
+        self.assertEqual(settings.models_headers("api", self.url, clear_key=True), {})
+        self.assertEqual(settings.models_headers("api", "https://other.example/v1"), {})
+        self.assertEqual(settings.models_headers("ollama", "http://127.0.0.1:11434"), {})
+        with self.assertRaises(settings.SettingsError):
+            settings.models_headers("api", "http://example.com/v1", "draft-key")
+
+    def test_environment_base_url_is_normalized_and_keeps_key(self):
+        env = {
+            "BOTALOID_MODEL_URL": "https://example.com/v1",
+            "BOTALOID_MODEL": "model",
+            "BOTALOID_API_KEY": "test-key",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            loaded = settings.load_settings()
+            self.assertEqual(loaded.api.url, self.url)
+            self.assertEqual(loaded.api.key_ref, "env")
+            self.assertEqual(settings.active_connection()[2], "test-key")
+            self.assertEqual(settings.models_headers("api", self.url),
+                             {"Authorization": "Bearer test-key"})
+            draft = settings.Draft(provider="api", url=loaded.api.url, model="other")
+            self.assertEqual(settings.draft_connection(draft)[2], "test-key")
+            result = settings.save_settings(draft)
+            self.assertTrue(result["api"]["has_key"])
+            self.assertEqual(settings.active_connection()[2], "test-key")
+
+    def test_saved_raw_env_url_still_uses_environment_key(self):
+        self.path.write_text(json.dumps({
+            "active": "api",
+            "ollama": {"url": settings.DEFAULT_OLLAMA_URL, "model": "local"},
+            "api": {"url": "https://example.com/v1", "model": "model", "key_ref": "env"},
+        }), encoding="utf-8")
+        with patch.dict(os.environ, {
+            "BOTALOID_MODEL_URL": "https://example.com/v1",
+            "BOTALOID_MODEL": "model",
+            "BOTALOID_API_KEY": "test-key",
+        }, clear=True):
+            self.assertEqual(settings.active_connection()[2], "test-key")
+            self.assertTrue(settings.public_settings(settings.load_settings())["api"]["has_key"])
+            self.assertEqual(settings.models_headers("api", "https://example.com/v1"),
+                             {"Authorization": "Bearer test-key"})
+
+    def test_public_settings_ignores_invalid_environment_fallback(self):
+        settings.save_settings(settings.Draft(
+            provider="api", url=self.url, model="model", api_key="saved-key"))
+        with patch.dict(os.environ, {"BOTALOID_MODEL_URL": "not a url"}, clear=True):
+            result = settings.public_settings(settings.load_settings())
+        self.assertTrue(result["api"]["has_key"])
+
+    def test_environment_ollama_url_is_normalized(self):
+        with patch.dict(os.environ, {
+            "BOTALOID_MODEL_URL": "http://127.0.0.1:11434/api/chat/",
+            "BOTALOID_MODEL": "local",
+        }, clear=True):
+            loaded = settings.load_settings()
+            self.assertEqual(loaded.active, "ollama")
+            self.assertEqual(loaded.ollama.url, settings.DEFAULT_OLLAMA_URL)
+
     def test_parameters_round_trip_and_are_per_provider(self):
         settings.save_settings(settings.Draft(
             provider="api", url=self.url, model="m",
@@ -113,6 +180,40 @@ class ModelSettingsTests(unittest.TestCase):
         ollama = settings.public_settings(settings.load_settings())["ollama"]
         self.assertEqual((ollama["num_ctx"], ollama["think"], ollama["temperature"]), (16384, True, 0.1))
         self.assertIsNone(ollama["json_mode"])
+
+    def test_api_reasoning_effort_round_trip(self):
+        settings.save_settings(settings.Draft(
+            provider="api", url=self.url, model="m", reasoning_effort="low"))
+        api = settings.public_settings(settings.load_settings())["api"]
+        self.assertEqual(api["reasoning_effort"], "low")
+        settings.save_settings(settings.Draft(
+            provider="ollama", url="http://127.0.0.1:11434", model="local",
+            reasoning_effort="high"))
+        ollama = settings.public_settings(settings.load_settings())["ollama"]
+        self.assertIsNone(ollama["reasoning_effort"])
+
+    def test_api_reasoning_effort_is_sent_only_when_set(self):
+        class Response:
+            status_code = 200
+
+            def json(self):
+                return {"choices": [{"message": {"content": '{"ok": true}'}}]}
+
+        captured = {}
+        connection = settings.draft_connection(settings.Draft(
+            provider="api", url=self.url, model="m", reasoning_effort="none"))
+        with patch.object(settings.requests, "post",
+                          side_effect=lambda url, **kwargs: captured.update(kwargs) or Response()):
+            settings.request_model(connection, "sys", "user", 0.2, {})
+        self.assertEqual(captured["json"]["reasoning_effort"], "none")
+
+        captured.clear()
+        connection = settings.draft_connection(settings.Draft(
+            provider="api", url=self.url, model="m"))
+        with patch.object(settings.requests, "post",
+                          side_effect=lambda url, **kwargs: captured.update(kwargs) or Response()):
+            settings.request_model(connection, "sys", "user", 0.2, {})
+        self.assertNotIn("reasoning_effort", captured["json"])
 
     def test_request_body_uses_profile_parameters(self):
         class Response:
@@ -148,6 +249,82 @@ class ModelSettingsTests(unittest.TestCase):
             settings.request_model(connection, "sys", "user", 0.2, schema)
         self.assertNotIn("max_tokens", captured["json"])
         self.assertEqual(captured["json"]["response_format"], {"type": "json_object"})
+
+    def test_parse_model_json_handles_fences_prose_and_content_parts(self):
+        self.assertEqual(settings.parse_model_json('```json\n{"ok": true}\n```'), {"ok": True})
+        self.assertEqual(settings.parse_model_json('说明\n{"ok": true}\n结束'), {"ok": True})
+        self.assertEqual(settings.parse_model_json(
+            [{"type": "text", "text": '{"ok": true}'}]), {"ok": True})
+        with self.assertRaises(settings.ModelError):
+            settings.parse_model_json("不是 JSON")
+        with self.assertRaises(settings.ModelError):
+            settings.parse_model_json("[]")
+
+    def api_response(self, content, finish_reason="stop", reasoning=None):
+        message = {"content": content}
+        if reasoning is not None:
+            message["reasoning"] = reasoning
+
+        class Response:
+            status_code = 200
+
+            def json(self):
+                return {"choices": [{"message": message, "finish_reason": finish_reason}]}
+
+        return Response()
+
+    def test_request_model_reports_truncated_or_empty_content(self):
+        connection = settings.draft_connection(settings.Draft(
+            provider="api", url=self.url, model="model"))
+        with patch.object(settings.requests, "post",
+                          return_value=self.api_response("", finish_reason="length")):
+            with self.assertRaises(settings.ModelError) as caught:
+                settings.request_model(connection, "system", "user", 0.2, {})
+        self.assertIn("截断", str(caught.exception))
+
+        with patch.object(settings.requests, "post",
+                          return_value=self.api_response("", reasoning="thinking")):
+            with self.assertRaises(settings.ModelError) as caught:
+                settings.request_model(connection, "system", "user", 0.2, {})
+        self.assertIn("思考", str(caught.exception))
+
+        with patch.object(settings.requests, "post", return_value=self.api_response("")):
+            with self.assertRaises(settings.ModelError) as caught:
+                settings.request_model(connection, "system", "user", 0.2, {})
+        self.assertIn("没有返回内容", str(caught.exception))
+
+        with patch.object(settings.requests, "post",
+                          return_value=self.api_response('```json\n{"ok": true}\n```')):
+            self.assertEqual(
+                settings.request_model(connection, "system", "user", 0.2, {}),
+                {"ok": True})
+
+        with patch.object(settings.requests, "post",
+                          return_value=self.api_response('{"ok": true}',
+                                                         finish_reason="content_filter")):
+            with self.assertRaises(settings.ModelError) as caught:
+                settings.request_model(connection, "system", "user", 0.2, {})
+        self.assertIn("过滤", str(caught.exception))
+
+        with patch.object(settings.requests, "post",
+                          return_value=self.api_response("不是 JSON")):
+            with self.assertRaises(settings.ModelError) as caught:
+                settings.request_model(connection, "system", "user", 0.2, {})
+        self.assertIn("JSON", str(caught.exception))
+
+    def test_ollama_length_finish_is_reported(self):
+        class Response:
+            status_code = 200
+
+            def json(self):
+                return {"message": {"content": ""}, "done_reason": "length"}
+
+        connection = settings.draft_connection(settings.Draft(
+            provider="ollama", url="http://127.0.0.1:11434", model="local"))
+        with patch.object(settings.requests, "post", return_value=Response()):
+            with self.assertRaises(settings.ModelError) as caught:
+                settings.request_model(connection, "system", "user", 0.2, {})
+        self.assertIn("截断", str(caught.exception))
 
     def test_language_settings_defaults_and_round_trip(self):
         defaults = settings.public_settings(settings.load_settings())
@@ -215,6 +392,32 @@ class ModelSettingsTests(unittest.TestCase):
         self.assertTrue(body["think"])
         self.assertEqual(body["format"], schema)
         self.assertNotIn("response_format", body)
+
+
+class KeyringTests(unittest.TestCase):
+    def test_keyring_available_uses_backend_priority(self):
+        with patch.object(settings.keyring, "get_keyring",
+                          return_value=types.SimpleNamespace(priority=0)):
+            self.assertFalse(settings.keyring_available())
+        with patch.object(settings.keyring, "get_keyring",
+                          return_value=types.SimpleNamespace(priority=5)):
+            self.assertTrue(settings.keyring_available())
+        with patch.object(settings.keyring, "get_keyring", side_effect=ImportError):
+            self.assertFalse(settings.keyring_available())
+
+    def test_save_reports_actionable_keyring_guidance(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "model-settings.json"
+            draft = settings.Draft(
+                provider="api", url="https://example.com/v1/chat/completions",
+                model="m", api_key="key")
+            with patch.object(settings, "SETTINGS_FILE", path), \
+                    patch.object(settings, "keyring_available", return_value=False):
+                with self.assertRaises(settings.SettingsError) as caught:
+                    settings.save_settings(draft)
+            self.assertIn("BOTALOID_API_KEY", str(caught.exception))
+            self.assertIn("keyrings.alt", str(caught.exception))
+            self.assertFalse(path.exists())
 
 
 if __name__ == "__main__":

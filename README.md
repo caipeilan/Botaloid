@@ -137,6 +137,9 @@ flowchart LR
 > [!IMPORTANT]
 > 模型需要能按要求输出 JSON。API Key 保存在系统凭据存储，模型地址、参数与曲库语言保存在本地 `model-settings.json`。
 
+> [!NOTE]
+> 无桌面环境可能没有可用的系统凭据存储。可设置 `BOTALOID_API_KEY`，或安装 `keyrings.alt` 并设置 `PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring`（明文，注意文件权限）；环境变量要设置在运行 uvicorn 的进程中。
+
 #### 曲库语言
 
 在「曲库语言」中填写歌词原文和译文使用的语言，以辅助模型用来生成检索词：
@@ -164,6 +167,7 @@ flowchart LR
 | 读取超时 | 75 秒 |
 | 上下文长度 | Ollama 使用 8192 |
 | 允许模型先思考 | Ollama 默认关闭 |
+| 推理强度 | 兼容接口默认不发送；可选 `none`、`minimal`、`low`、`medium`、`high`（OpenAI/OpenRouter 风格） |
 | 请求 JSON 模式 | 兼容接口默认开启 |
 
 推理模型会把思考过程计入 token，若上限过小 JSON 可能会被截断。
@@ -178,6 +182,15 @@ flowchart LR
 | `BOTALOID_SETTINGS_FILE` | 模型配置文件位置；文件不存在时读取环境变量 |
 | `BOTALOID_DB` | 曲库 SQLite 文件位置 |
 | `BOTALOID_ADMIN=0` | 关闭管理页面和管理接口，保留聊天功能 |
+| `BOTALOID_ADMIN_HOSTS` | 允许访问管理页的 Host，逗号分隔；默认本机地址与 localhost |
+| `BOTALOID_ADMIN_NETWORKS` | 允许访问管理页的客户端 IP/CIDR，逗号分隔；默认仅 loopback |
+
+管理页默认只允许本机访问。要从局域网访问，需要同时配置客户端网段和 Host，例如：
+
+```sh
+BOTALOID_ADMIN_NETWORKS=192.168.1.0/24
+BOTALOID_ADMIN_HOSTS=192.168.1.10,server.local
+```
 
 已有配置文件优先于环境变量。服务器或容器等没有系统凭据存储的环境，可以只用环境变量：设置 `BOTALOID_MODEL_URL`、`BOTALOID_MODEL`，需要时再设置 `BOTALOID_API_KEY`，并让 `BOTALOID_SETTINGS_FILE` 指向一个尚不存在的路径，避免读到旧配置。
 

@@ -21,6 +21,7 @@ const params = {
   timeout: byId("timeout"),
   num_ctx: byId("num-ctx"),
   think: byId("think"),
+  reasoning_effort: byId("reasoning-effort"),
   json_mode: byId("json-mode"),
 };
 let settings;
@@ -66,12 +67,14 @@ function showProfile() {
   byId("api-key-fields").hidden = local;
   byId("num-ctx-field").hidden = !local;
   byId("think-field").hidden = !local;
+  byId("reasoning-effort-field").hidden = local;
   byId("json-mode-field").hidden = local;
   params.temperature.value = profile.temperature ?? "";
   params.max_tokens.value = profile.max_tokens ?? "";
   params.timeout.value = profile.timeout ?? "";
   params.num_ctx.value = profile.num_ctx ?? "";
   params.think.checked = Boolean(profile.think);
+  params.reasoning_effort.value = profile.reasoning_effort ?? "";
   params.json_mode.checked = profile.json_mode !== false;
   keyState();
 }
@@ -97,6 +100,7 @@ function draft() {
     timeout: numberOrNull(params.timeout),
     num_ctx: remote ? null : numberOrNull(params.num_ctx),
     think: remote ? null : params.think.checked,
+    reasoning_effort: remote && params.reasoning_effort.value ? params.reasoning_effort.value : null,
     json_mode: remote ? params.json_mode.checked : null,
     original_languages: languageList(originalLanguages),
     translation_languages: languageList(translationLanguages),
@@ -130,8 +134,13 @@ for (const input of [originalLanguages, translationLanguages]) input.addEventLis
 byId("load-models").addEventListener("click", () => {
   if (!url.reportValidity()) return;
   run("正在读取模型…", async () => {
-    const query = new URLSearchParams({provider: provider.value, url: url.value.trim()});
-    const {models} = await api(endpoint + "/models?" + query);
+    const payload = {
+      provider: provider.value,
+      url: url.value.trim(),
+      api_key: !clear.checked && key.value.trim() ? key.value.trim() : null,
+      clear_key: clear.checked,
+    };
+    const {models} = await api(endpoint + "/models", "POST", payload);
     installed.replaceChildren(new Option("选择模型", ""), ...models.map(name => new Option(name, name)));
     installed.hidden = !models.length;
     notice(status, models.length ? "已读取 " + models.length + " 个模型。" : "接口没有返回可用模型，请手动填写。");
