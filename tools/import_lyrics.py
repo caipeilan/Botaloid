@@ -57,7 +57,7 @@ def main():
     added, skipped = import_file(args.input, args.database)
     print(f'导入完成：新增 {added} 首，跳过 {skipped} 首。')
     print('曲库:', args.database.resolve())
-    print('若网页服务正在运行，请重启服务后使用新曲库。')
+    print('网页服务会在下次检索时按曲库版本刷新索引。')
 
 
 if __name__ == '__main__':

@@ -35,9 +35,9 @@ class ChatTests(unittest.TestCase):
                          [("空", "明日また会おう"), ("海", "雨がやんだ")])
 
     def test_disabled_and_stale_lines_cannot_be_returned(self):
-        lines, tracks = self.bot._lyrics_for(self.db)
-        first, second, _ = lines
-        quotes = chat.quote_options([(first,), (second,)], [], tracks)
+        tracks = {song_id: chat.load_track(self.db, song_id) for song_id in (1, 2)}
+        first, second = (track.lines[0] for track in tracks.values())
+        quotes = chat.quote_options([(first,), (second,)], [], tracks.__getitem__)
         self.db.execute("UPDATE songs SET enabled=0 WHERE id=?", (first.song_id,))
         self.db.execute("UPDATE lyric_lines SET text='changed' WHERE id=?", (second.id,))
         self.assertEqual(chat.answer_candidates(self.db, quotes), [])
@@ -50,9 +50,29 @@ class ChatTests(unittest.TestCase):
         self.db.commit()
         index = self.bot._index_for(self.db)
         groups = chat.query_groups({"directions": [["雨がやんだ"], ["明日また会おう"]]}, "！")
-        options = chat.candidates_for(index, {line.song_id for line in index.lines}, groups, [])
+        options = chat.candidates_for(self.db, index, set(index.song_ids), groups, [])
         self.assertEqual(len(options), 16)
         self.assertIn("明日また会おう", {option[0].text for option in options[:2]})
+
+    def test_batched_vector_index_matches_tfidf_with_feature_limit(self):
+        import numpy as np
+        from sklearn.feature_extraction.text import TfidfVectorizer
+
+        self.db.execute("UPDATE lyric_lines SET translation='静静的夜晚' WHERE song_id=3")
+        self.db.commit()
+        documents = [chat.normalized(text) + " " + chat.normalized(translation or "")
+                     for text, translation in self.db.execute(
+                         "SELECT text,translation FROM lyric_lines ORDER BY song_id,position")]
+        expected = TfidfVectorizer(analyzer="char", ngram_range=(1, 3), dtype=np.float32, max_features=12)
+        matrix = expected.fit_transform(documents)
+        with patch.object(chat, "MAX_INDEX_TERMS", 12), patch.object(chat, "INDEX_BATCH_ROWS", 2):
+            index = self.bot._index_for(self.db)
+
+        self.assertEqual(index.vectorizer.named_steps["countvectorizer"].vocabulary_, expected.vocabulary_)
+        np.testing.assert_allclose(index.matrix.T.toarray(), matrix.toarray(), rtol=1e-6)
+        queries = ["静静的夜晚", "雨が", "明日"]
+        np.testing.assert_allclose(index.vectorizer.transform(queries).toarray(),
+                                   expected.transform(queries).toarray(), rtol=1e-6)
 
     def test_project_intro_searches_for_identity_before_fallback(self):
         self.db.execute("UPDATE lyric_lines SET fallback_kind='default' WHERE song_id=3")
@@ -262,6 +282,73 @@ class ChatTests(unittest.TestCase):
         result = self.bot.reply("找《海》这首歌")
         self.assertEqual((result["status"], result["intent"], result["songs"], result["fragments"]),
                          ("no_match", "find_song", [], []))
+
+    def test_recommendation_keeps_resolved_credit_through_selection(self):
+        song_id, _ = app.write_song(self.db, app.SongInput(
+            title="夜道", author="r-906 / 歌手", lyrics=["夜道を歩く。"]))
+        app.write_song(self.db, app.SongInput(title="別の道", author="r-9065", lyrics=["夜道を歩く。"]))
+        self.db.commit()
+
+        def model(system, context, *_):
+            if system == chat.PLAN:
+                return {"intent": "recommend", "author": "r-906", "directions": [["夜道"]]}
+            self.assertIn('"author": "r-906"', chat.model_prompt(context))
+            self.assertEqual([item["title"] for item in context["candidates"]], ["夜道"])
+            self.db.execute("UPDATE songs SET author='r-907 / 歌手' WHERE id=?", (song_id,))
+            self.db.commit()
+            return {"choices": [1]}
+
+        with patch.object(chat, "model_json", side_effect=model):
+            result = self.bot.reply("推荐 r-906 写夜路的歌")
+        self.assertEqual((result["intent"], result["songs"]), ("recommend", []))
+
+    def test_asking_after_verified_last_line_stays_on_that_song(self):
+        self.model.side_effect = [{"intent": "find_lyrics", "relative": "after", "directions": [["夜"]]}]
+        result = self.bot.reply("这句后面唱什么？", [
+            {"role": "assistant", "text": "静かな夜", "source": {"song_id": 3, "end": 0}},
+        ])
+        self.assertEqual((result["intent"], result["status"], result["fragments"]),
+                         ("find_lyrics", "no_match", []))
+        self.model.assert_called_once()
+
+    def test_named_lookup_reads_only_that_track_and_skips_vector_index(self):
+        self.model.side_effect = [{"intent": "find_lyrics", "directions": []}]
+        with patch.object(chat, "load_track", wraps=chat.load_track) as tracks:
+            result = self.bot.reply("看一下《海》的歌词")
+        self.assertEqual(result["fragments"][0]["title"], "海")
+        self.assertEqual({call.args[1] for call in tracks.call_args_list}, {1})
+        self.assertIsNone(self.bot._song_keys)
+        self.assertIsNone(self.bot._index)
+
+    def test_unscoped_exact_lookup_spans_lines_after_edit(self):
+        self.model.side_effect = lambda system, *_: {
+            "intent": "find_lyrics", "directions": [],
+        } if system == chat.PLAN else self.fail("expected an exact match")
+        for first, second in [("街灯を消した。", "夜風が来た。"), ("雨音がした。", "朝が来た。")]:
+            with patch.object(app, "bot", self.bot):
+                app.update_song(1, app.SongInput(title="海", author="作者", lyrics=[first, second]))
+            self.assertIsNone(self.bot._song_keys)
+            result = self.bot.reply(first + second)
+            self.assertEqual(result["fragments"][0]["text"], first + "\n" + second)
+            self.assertIsNone(self.bot._index)
+
+    def test_vector_index_observes_import_edit_and_toggle(self):
+        self.model.side_effect = lambda system, *_: (
+            {"intent": "chat", "directions": [["玻璃行星"]]} if system == chat.PLAN else {"choices": [1]})
+
+        def song(text):
+            return app.SongInput(title="星", author="作者", lyrics=[{"text": text, "translation": "玻璃行星"}])
+
+        with patch.object(app, "bot", self.bot):
+            self.assertEqual(self.bot.reply("玻璃行星")["fragments"], [])
+            app.import_songs([song("遠くの惑星。")])
+            self.assertEqual(self.bot.reply("玻璃行星")["fragments"][0]["text"], "遠くの惑星。")
+            index = self.bot._index
+            app.set_enabled(4, app.EnabledInput(enabled=False))
+            self.assertEqual(self.bot.reply("玻璃行星")["fragments"], [])
+            self.assertIs(self.bot._index, index)
+            app.update_song(4, song("新しい惑星。"))
+            self.assertEqual(self.bot.reply("玻璃行星")["fragments"][0]["text"], "新しい惑星。")
 
     def test_language_config_reaches_plan_and_select(self):
         contexts = []

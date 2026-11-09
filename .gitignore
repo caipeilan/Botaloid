@@ -5,6 +5,7 @@ dist/
 *.egg-info/
 *.sqlite3
 *.sqlite3-*
+*.botaloid-index/
 .env
 .env.*
 !.env.example

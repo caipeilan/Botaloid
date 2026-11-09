@@ -83,8 +83,10 @@ class Track:
     def matches(self, key):
         if not key:
             return
-        ends = self.boundaries
         start = self.key.find(key)
+        if start < 0:
+            return
+        ends = self.boundaries
         while start >= 0:
             stop = start + len(key)
             boundary = bisect_left(ends, stop)
