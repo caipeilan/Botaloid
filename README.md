@@ -113,18 +113,34 @@ flowchart LR
 .\.venv\Scripts\python -m uvicorn app:app --host 127.0.0.1 --port 8765 --no-proxy-headers
 ```
 
-之后打开[聊天界面](http://127.0.0.1:8765/)，设置页在[设置](http://127.0.0.1:8765/settings)。
+之后打开[聊天界面](http://127.0.0.1:8765/)，设置页见[设置](http://127.0.0.1:8765/settings)。
 
 > [!NOTE]
 > 默认读取根目录的 `botaloid.sqlite3`；没有该文件时会识别项目改名前的旧版 `vocaloid_rag.sqlite3`。也可用 `BOTALOID_DB` 指定曲库文件。
 
-设置页可支持查看、编辑、启用或停用曲目，也可手动新增歌曲。
+设置页可查看、编辑、启用或停用曲目，也可手动新增歌曲。
 
-管理页或命令行修改歌词后，下次检索会按曲库版本重建所需索引。启用和停用曲目即时生效。
+**有关索引的详细信息**
 
-首次需要时，程序会在曲库旁的 `<曲库文件名>.botaloid-index/` 保存可重建的检索索引。重启后按曲库版本复用 TF-IDF 索引。支持 FTS5 trigram 的 SQLite 还会用它查找明确的歌词片段或译文，回复引用对应的歌词原文。
+<details>
+<summary>展开查看</summary>
 
-网页服务启动时默认使用单线程 OpenBLAS，已有的 OpenBLAS 或 OpenMP 线程设置优先。复用磁盘索引时，查询通过 NumPy 和 SciPy 计算。首次构建和歌词更新后的重建使用 scikit-learn。
+检索索引位于曲库旁的 `<曲库文件名>.botaloid-index/`，按曲库版本命名：
+
+- `tfidf-v1-<generation>-<token>-100000.npy`：TF-IDF 稀疏矩阵、vocabulary 与 idf。
+- `fts-v1-<generation>-<token>.sqlite3`：FTS5 trigram 索引，按需构建。
+
+曲库版本由 `botaloid_lyric_revision` 表与 `lyric_lines` 上的 INSERT/UPDATE/DELETE 触发器维护；任一歌词行变化后，下一次需要索引的检索会重建。`songs.enabled` 不参与版本计算，检索时按当前启用状态过滤。构建在请求内同步执行：char 1–3 gram，词表上限 100000（超出按总词频保留），4096 行一批，临时文件原子替换。索引按版本命名，其他版本自动清理。
+
+复用磁盘索引时以 `np.load(mmap_mode="r")` 只读映射，查询使用 NumPy/SciPy 稀疏运算和缓存的 vocabulary/idf；scikit-learn 用于构建。
+
+索引目录不可写时，已存在的可读索引仍会复用；新索引无法落盘时只保留在内存，每个进程启动后重建，FTS5 无法新建时跳过。
+
+FTS5 仅在 `find_song` / `find_lyrics`、用户线索（cue）规范化后至少 3 个字符、内存精确匹配未命中时使用；同时检索原文和译文，返回原文。FTS 索引由规范化后的歌词与译文生成，清理曲库数据时一并删除索引目录。环境不支持或索引损坏时回退向量检索；损坏的 FTS 会在下一次尝试重建。
+
+网页服务启动时，若 `OPENBLAS_NUM_THREADS`、`OPENBLAS_DEFAULT_NUM_THREADS`、`GOTO_NUM_THREADS`、`OMP_NUM_THREADS` 均未设置，则设 `OPENBLAS_NUM_THREADS=1`；该变量需在 import NumPy 前设置。
+
+</details>
 
 ### 4. 更换模型
 
@@ -133,6 +149,8 @@ flowchart LR
 #### OpenAI 兼容接口
 
 适用于远程 API、LM Studio、llama.cpp、vLLM 等。填写接口地址、模型名和 API Key。地址支持主机、`/v1` 基址或完整 `/chat/completions`。
+
+模型列表：`POST /api/model-settings/models`，body `{provider, url, api_key, clear_key}`。未传 `api_key` 时，若 URL 与已保存配置一致则使用已保存的 Key。远程地址发送 Key 强制 HTTPS（loopback 除外）。上游非 200 或返回格式不兼容时返回 502，detail 区分重定向、401/403/404/429/5xx 与格式不兼容；连接超时 4s、读取 6s，禁用重定向。
 
 #### Ollama
 
@@ -174,7 +192,7 @@ flowchart LR
 | 推理强度 | 兼容接口默认不发送；可选 `none`、`minimal`、`low`、`medium`、`high`（OpenAI/OpenRouter 风格） |
 | 请求 JSON 模式 | 兼容接口默认开启 |
 
-推理模型会把思考过程计入 token，若上限过小 JSON 可能会被截断。
+`finish_reason=length` / `done_reason=length`、`finish_reason=content_filter`、仅返回 reasoning、无法解析为 JSON 时，`/api/chat` 返回 503，detail 说明原因。
 
 服务器也可以通过环境变量提供初始配置：
 
@@ -189,7 +207,7 @@ flowchart LR
 | `BOTALOID_ADMIN_HOSTS` | 允许访问管理页的 Host，逗号分隔；默认本机地址与 localhost |
 | `BOTALOID_ADMIN_NETWORKS` | 允许访问管理页的客户端 IP/CIDR，逗号分隔；默认仅 loopback |
 
-管理页默认只允许本机访问。要从局域网访问，需要同时配置客户端网段和 Host，例如：
+管理路由同时校验客户端 IP（`BOTALOID_ADMIN_NETWORKS`，默认 loopback）和 Host（`BOTALOID_ADMIN_HOSTS`），任一不匹配返回 403；POST/PUT/PATCH 额外校验 Origin。局域网访问时两项都要配置，例如：
 
 ```sh
 BOTALOID_ADMIN_NETWORKS=192.168.1.0/24
@@ -222,7 +240,7 @@ const result = await response.json();
 console.log(result);
 ```
 
-每个私聊、群或话题各自保存一份 `history` 和 `tone`；同一段会话按顺序调用。”
+每个私聊、群或话题各自保存一份 `history` 和 `tone`；同一段会话按顺序调用。
 
 > [!WARNING]
 > 对外部署时设置 `BOTALOID_ADMIN=0`，由代理层负责鉴权和限流。
@@ -262,7 +280,7 @@ Python 和 HTTP 使用相同的数据结构：
 | `history` | 最多 10 条近期消息，每条包含 `role`（`user` 或 `assistant`）和 `text`（最多 1000 字符） |
 | `tone` | 上一轮返回的语气；新会话使用 `neutral` |
 
-助手历史还可包含 `intent`、按展示顺序排列的 `song_ids` 和片段 `source`。这些信息用于接龙及「第二首」「这句后面」等指代；`tone` 作为下一次请求的顶层字段回传。模型参考最近 6 条历史消息，每条最多 350 字符。
+助手历史还可包含 `intent`、按展示顺序排列的 `song_ids`（最多 3 个）和片段 `source`。这些信息用于接龙及「第二首」「这句后面」等指代；`tone` 作为下一次请求的顶层字段回传。模型参考最近 6 条历史消息，每条最多 350 字符。
 
 | 返回字段 | 内容 |
 | --- | --- |
@@ -271,9 +289,10 @@ Python 和 HTTP 使用相同的数据结构：
 | `songs` | 曲目 `id`、`title`、`author`；有相关原文时附 `excerpt` 和 `source` |
 | `source`（片段内） | `song_id`、`start`、`end`，表示当前曲库中短句的起止位置 |
 | `status` | `ok` 有结果、`no_match` 没找到、`ended` 唱到曲末 |
+| `ended` | 仅 `status` 为 `ended` 时出现，值为 `true` |
 | `tone` | 本轮语气，传回同一段对话以延续态度 |
 
-HTTP 参数校验失败返回 422；模型调用失败返回 503。
+HTTP 参数校验失败返回 422；模型调用失败、输出截断或无法解析返回 503。
 
 ## 导入自己的数据
 
@@ -336,11 +355,11 @@ HTTP 参数校验失败返回 422；模型调用失败返回 503。
 ## 上游与感谢
 
 - [FastAPI](https://fastapi.tiangolo.com/)、[Pydantic](https://docs.pydantic.dev/)、[Uvicorn](https://www.uvicorn.org/)：HTTP 服务和数据校验。
-- [scikit-learn](https://scikit-learn.org/)、[NumPy](https://numpy.org/)：字符 TF-IDF 检索和数值计算。
+- [scikit-learn](https://scikit-learn.org/)、[NumPy](https://numpy.org/)、[SciPy](https://scipy.org/)：字符 TF-IDF 检索、稀疏矩阵和数值计算。
 - [Requests](https://requests.readthedocs.io/)、[keyring](https://github.com/jaraco/keyring)：模型与数据请求、系统凭据存储。
 - [Ollama](https://ollama.com/) 及 OpenAI 兼容接口的模型服务。
 - [小赖等宽](https://github.com/lxgw/kose-font/releases/tag/v3.126)：本地界面字体，许可证见 [OFL-Xiaolai.txt](web/assets/fonts/OFL-Xiaolai.txt)。
-- 感谢 [bilibili @Richardn2002](https://space.bilibili.com/213997744) 提供的数据建议。
+- 感谢 [bilibili @Richardn2002](https://space.bilibili.com/213997744) 提供的数据建议和使用反馈。
 
 感谢原作者、演唱者和歌词及译文的贡献者。
 

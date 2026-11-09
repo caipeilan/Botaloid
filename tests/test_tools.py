@@ -103,7 +103,7 @@ class ToolTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT count(*) FROM songs').fetchone()[0], 0)
 
     def test_demo_import_preserves_disabled_state_and_fallback(self):
-        source = Path(__file__).parent / 'tools' / 'example_lyrics.json'
+        source = Path(__file__).parent.parent / 'tools' / 'example_lyrics.json'
         database = self.folder / 'library.sqlite3'
         self.assertEqual(import_file(source, database), (2, 0))
         with closing(sqlite3.connect(database)) as db, db:
