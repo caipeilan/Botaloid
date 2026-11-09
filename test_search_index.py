@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import unittest
 from contextlib import closing
@@ -53,6 +54,41 @@ class SearchIndexTests(unittest.TestCase):
         with patch.object(fresh, "_build_index", side_effect=AssertionError("expected cached index")):
             self.assertEqual(self.reply(fresh, self.translation), expected)
         self.assertFalse(fresh._index.matrix.data.flags.writeable)
+
+    def test_cached_query_weights_match_the_index_builder(self):
+        import numpy as np
+
+        with closing(self.bot.connect()) as db, db:
+            app.write_song(db, app.SongInput(title="声", author="作者", lyrics=["Robot singing tonight."]))
+        self.reply(self.bot, self.translation)
+        queries = [self.text, self.translation, "月", "月" * 120, "灯り    月", "ROBOT", "", "❤"]
+        expected = self.bot._index.vectorizer.transform(queries)
+        fresh = self.open_bot()
+        self.reply(fresh, self.translation)
+        cached = fresh._index.vectorizer.transform(queries)
+        self.assertEqual(cached.shape, expected.shape)
+        np.testing.assert_array_equal(cached.indptr, expected.indptr)
+        np.testing.assert_array_equal(cached.indices, expected.indices)
+        np.testing.assert_array_equal(cached.data, expected.data)
+
+    def test_invalid_cached_vocabulary_is_rebuilt(self):
+        import numpy as np
+
+        expected = self.reply(self.bot, self.translation)
+        path, = self.files("tfidf-*.npy")
+        mapped = np.load(path, mmap_mode="r+", allow_pickle=False)
+        metadata = json.loads(mapped["meta"].tobytes())
+        first = next(term for term, column in metadata["vocabulary"].items() if column == 0)
+        metadata["vocabulary"][first] = 1
+        damaged = json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        mapped["meta"] = np.frombuffer(damaged, dtype=np.uint8)
+        mapped.flush()
+        del mapped
+
+        fresh = self.open_bot()
+        with patch.object(fresh, "_build_index", wraps=fresh._build_index) as build:
+            self.assertEqual(self.reply(fresh, self.translation), expected)
+            build.assert_called_once()
 
     def test_corrupt_vector_cache_is_rebuilt_and_can_be_reopened(self):
         expected = self.reply(self.bot, self.translation)

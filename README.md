@@ -124,6 +124,8 @@ flowchart LR
 
 首次需要时，程序会在曲库旁的 `<曲库文件名>.botaloid-index/` 保存可重建的检索索引。重启后按曲库版本复用 TF-IDF 索引。支持 FTS5 trigram 的 SQLite 还会用它查找明确的歌词片段或译文，回复引用对应的歌词原文。
 
+网页服务启动时默认使用单线程 OpenBLAS，已有的 OpenBLAS 或 OpenMP 线程设置优先。复用磁盘索引时，查询通过 NumPy 和 SciPy 计算。首次构建和歌词更新后的重建使用 scikit-learn。
+
 ### 4. 更换模型
 
 进入「设置 → 模型设置」以配置模型信息。保存后下一轮聊天使用新设置。

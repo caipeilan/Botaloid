@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager, closing
 import ipaddress
+import os
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -26,6 +27,9 @@ bot = LyricBot(DATABASE)
 
 @asynccontextmanager
 async def lifespan(_app):
+    thread_settings = ("OPENBLAS_NUM_THREADS", "OPENBLAS_DEFAULT_NUM_THREADS", "GOTO_NUM_THREADS", "OMP_NUM_THREADS")
+    if not any(name in os.environ for name in thread_settings):
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     bot.initialize()
     yield
 

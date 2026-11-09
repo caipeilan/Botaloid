@@ -1,11 +1,13 @@
 import json
 import logging
 import os
+import re
 import sqlite3
 from array import array
 from collections import Counter
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
+from math import sqrt
 from pathlib import Path
 from tempfile import mkstemp
 
@@ -27,6 +29,8 @@ END;
 
 VECTOR_FORMAT = 1
 FTS_FORMAT = 1
+NGRAM_RANGE = (1, 3)
+WHITESPACE_RUN = re.compile(r"\s\s+")
 
 
 @dataclass(frozen=True)
@@ -35,6 +39,44 @@ class Index:
     song_ids: array
     vectorizer: object
     matrix: object
+
+
+class CachedQueryVectorizer:
+    def __init__(self, vocabulary, idf):
+        self.vocabulary = vocabulary
+        self.idf = idf
+
+    def transform(self, documents):
+        import numpy as np
+        from scipy.sparse import csr_matrix
+
+        columns, data, offsets = [], [], [0]
+        shortest, longest = NGRAM_RANGE
+        for document in documents:
+            text = WHITESPACE_RUN.sub(" ", document.lower())
+            counts = Counter()
+            for width in range(shortest, min(longest, len(text)) + 1):
+                for start in range(len(text) - width + 1):
+                    column = self.vocabulary.get(text[start:start + width])
+                    if column is not None:
+                        counts[column] += 1
+            indices = sorted(counts)
+            weights = np.asarray([counts[i] for i in indices], dtype=np.float32) * self.idf[indices]
+
+            # Match the builder's float32 products and double-precision L2 normalization.
+            squared_norm = 0.0
+            for square in weights * weights:
+                squared_norm += float(square)
+            if squared_norm:
+                weights = (weights.astype(np.float64) / sqrt(squared_norm)).astype(np.float32)
+            columns.extend(indices)
+            data.extend(weights)
+            offsets.append(len(columns))
+        return csr_matrix(
+            (np.asarray(data, dtype=np.float32), np.asarray(columns, dtype=np.int32),
+             np.asarray(offsets, dtype=np.int32)),
+            shape=(len(offsets) - 1, len(self.vocabulary)),
+        )
 
 
 def library_revision(db):
@@ -122,13 +164,19 @@ def vector_metadata(path):
     meta = json.loads(mapped["meta"].tobytes())
     terms, documents = meta["shape"]
     vocabulary = meta["vocabulary"]
-    if (meta["key"] != path.name or terms != len(vocabulary) or terms < 1 or documents < 1
+    if (meta["key"] != path.name or type(terms) is not int or type(documents) is not int
+            or not isinstance(vocabulary, dict) or terms != len(vocabulary) or terms < 1 or documents < 1
             or mapped["line_ids"].shape != (documents,) or mapped["song_ids"].shape != (documents,)
             or mapped["line_ids"].dtype != np.int64 or mapped["song_ids"].dtype != np.int64
             or mapped["idf"].shape != (terms,) or mapped["idf"].dtype != np.float32
             or mapped["data"].dtype != np.float32 or mapped["indices"].dtype.kind != "i"
             or mapped["indptr"].dtype.kind != "i"):
         raise ValueError("invalid index metadata")
+    seen_columns = bytearray(terms)
+    for column in vocabulary.values():
+        if type(column) is not int or not 0 <= column < terms or seen_columns[column]:
+            raise ValueError("invalid index vocabulary")
+        seen_columns[column] = 1
     matrix = csr_matrix((mapped["data"], mapped["indices"], mapped["indptr"]),
                         shape=(terms, documents), copy=False)
     matrix.check_format(full_check=True)
@@ -144,7 +192,6 @@ def load_vector(path):
 
     import numpy as np
     from scipy.sparse import csr_matrix
-    from sklearn.feature_extraction.text import TfidfVectorizer
 
     try:
         # Validate in a separate mapping so the search mapping starts with cold pages.
@@ -154,9 +201,7 @@ def load_vector(path):
         line_ids, song_ids = array("q"), array("q")
         line_ids.frombytes(mapped["line_ids"].tobytes())
         song_ids.frombytes(mapped["song_ids"].tobytes())
-        vectorizer = TfidfVectorizer(analyzer="char", ngram_range=(1, 3),
-                                     dtype=np.float32, vocabulary=vocabulary)
-        vectorizer.idf_ = mapped["idf"]
+        vectorizer = CachedQueryVectorizer(vocabulary, mapped["idf"])
         return Index(line_ids, song_ids, vectorizer, matrix)
     except (OSError, EOFError, IndexError, KeyError, OverflowError, TypeError, ValueError) as error:
         log.debug("Ignoring unreadable lyric vector index %s: %s", path, error)

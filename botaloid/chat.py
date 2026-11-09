@@ -715,7 +715,7 @@ class LyricBot:
             for line_id, song_id, text, translation in rows:
                 yield line_id, song_id, normalized(text) + " " + normalized(translation or "")
 
-        params = {"analyzer": "char", "ngram_range": (1, 3), "dtype": np.float32}
+        params = {"analyzer": "char", "ngram_range": search_index.NGRAM_RANGE, "dtype": np.float32}
         analyze = CountVectorizer(**params).build_analyzer()
         frequencies = Counter()
         has_text = False

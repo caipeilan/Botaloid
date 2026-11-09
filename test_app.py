@@ -1,3 +1,4 @@
+import asyncio
 import os
 import unittest
 from unittest.mock import patch
@@ -26,6 +27,27 @@ def make_request(client="127.0.0.1", host="localhost:8765", method="GET", origin
         "headers": headers,
     }
     return Request(scope)
+
+
+class StartupTests(unittest.TestCase):
+    def test_default_openblas_threads_respect_existing_settings(self):
+        async def start():
+            async with app.lifespan(app.app):
+                return os.environ.get("OPENBLAS_NUM_THREADS")
+
+        for overrides, expected in (
+            ({}, "1"),
+            ({"OPENBLAS_NUM_THREADS": "2"}, "2"),
+            ({"OPENBLAS_DEFAULT_NUM_THREADS": "2"}, None),
+            ({"GOTO_NUM_THREADS": "2"}, None),
+            ({"OMP_NUM_THREADS": "2"}, None),
+        ):
+            with self.subTest(overrides=overrides), patch.dict(os.environ, overrides, clear=True), patch.object(
+                app.bot, "initialize"
+            ):
+                self.assertEqual(asyncio.run(start()), expected)
+                for name, value in overrides.items():
+                    self.assertEqual(os.environ[name], value)
 
 
 class AdminAccessTests(unittest.TestCase):
