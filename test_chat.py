@@ -82,7 +82,7 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(reply["fragments"], [{"text": "静かな夜", "title": "舟", "author": "作者", "song_id": 3}])
 
 
-    def test_singing_matches_different_line_breaks_and_continues_without_a_model(self):
+    def test_singing_matches_different_line_breaks_and_selects_a_continuation(self):
         app.write_song(self.db, app.SongInput(title="原版", author="作者", lyrics=[
             "期待なんてされてない　できない　いらない", "見ないフリしてそんじゃバイバイ",
             "『そんなことは思ってもないクセに！』", "まだね", "静かな空を見上げる",
@@ -93,7 +93,14 @@ class ChatTests(unittest.TestCase):
         ]))
         self.db.commit()
         text = "期待なんてされてない\nできない いらない\n見ないフリしてそんじゃバイバイ～"
-        with patch.object(chat, "model_json") as model:
+        def choose(system, context, *_):
+            if system == chat.PLAN:
+                return {"intent": "sing_along", "directions": []}
+            following = "静かな空を見上げる" if context["message"] == "まだね" else "『そんなことは思ってもないクセに！』"
+            candidate = next(item for item in context["candidates"] if item["phrases"] == [following])
+            return {"choices": [candidate["id"]]}
+
+        with patch.object(chat, "model_json", side_effect=choose) as model:
             reply = self.bot.reply(text)
             answer = reply["fragments"][0]
             self.assertEqual(answer["text"], "『そんなことは思ってもないクセに！』")
@@ -101,7 +108,7 @@ class ChatTests(unittest.TestCase):
                        {"role": "assistant", "text": answer["text"], "source": answer["source"]}]
             self.assertEqual(self.bot.reply("まだね", history)["fragments"][0]["text"],
                              "静かな空を見上げる")
-            model.assert_not_called()
+            self.assertEqual(model.call_count, 4)
 
     def test_model_uses_context_to_distinguish_singing_from_a_mood_quote(self):
         quoted = "眠れない夜をひとりで歩いていた"
@@ -112,15 +119,15 @@ class ChatTests(unittest.TestCase):
         for sing_along in (True, False):
             def model(system, prompt, _temperature, _connection):
                 if system == chat.PLAN:
-                    self.assertEqual(prompt["continuation"], ("夜", "君の声を聞かせて。"))
                     return {"intent": "sing_along" if sing_along else "chat", "directions": [["静かな夜"]], "tone": "warm"}
-                candidate = next(item for item in prompt["candidates"] if item["phrases"][0] == "静かな夜")
+                following = "君の声を聞かせて。" if sing_along else "静かな夜"
+                candidate = next(item for item in prompt["candidates"] if item["phrases"][:1] == [following])
                 return {"choices": [{"id": candidate["id"], "count": 1}]}
 
             with patch.object(chat, "model_json", side_effect=model) as mock:
                 reply = self.bot.reply(quoted, ordinary)
             self.assertEqual(reply["fragments"][0]["text"], "君の声を聞かせて。" if sing_along else "静かな夜")
-            self.assertEqual(mock.call_count, 1 if sing_along else 2)
+            self.assertEqual(mock.call_count, 2)
 
     def test_explicit_mood_context_keeps_a_lyric_quote_in_chat(self):
         quoted = "眠れない夜をひとりで歩いていた"
@@ -131,7 +138,7 @@ class ChatTests(unittest.TestCase):
         def model(system, prompt, _temperature, _connection):
             if system == chat.PLAN:
                 self.assertNotIn("continuation", prompt)
-                return {"directions": [["静かな夜"]], "tone": "warm", "intent": "sing_along"}
+                return {"directions": [["静かな夜"]], "tone": "warm", "intent": "chat"}
             candidate = next(item for item in prompt["candidates"] if item["phrases"][0] == "静かな夜")
             return {"choices": [{"id": candidate["id"], "count": 1}]}
 
@@ -203,6 +210,8 @@ class ChatTests(unittest.TestCase):
             {"intent": "find_song", "cue": lyric},
             {"intent": "find_lyrics", "reference": 1, "relative": "after"},
             {"intent": "find_lyrics", "cue": lyric, "title": "月", "relative": "before"},
+            {"intent": "sing_along", "cue": lyric, "directions": []},
+            {"choices": [1]},
         ]
         history = [{"role": "user", "text": "我只记得这几句歌词，想知道是哪首。"}]
         found = self.bot.reply(lyric, history)
@@ -218,7 +227,7 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(lookup["fragments"][0]["text"], "静かな道に出た。")
         sung = self.bot.reply(lyric)
         self.assertEqual((sung["intent"], sung["fragments"][0]["text"]), ("sing_along", following))
-        self.assertEqual(self.model.call_count, 3)
+        self.assertEqual(self.model.call_count, 5)
 
     def test_recommend_only_selects_distinct_enabled_songs(self):
         for title, lines, enabled in [

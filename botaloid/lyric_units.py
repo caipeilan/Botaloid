@@ -3,6 +3,7 @@ import unicodedata
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from functools import cached_property
 
 SENTENCE_END = re.compile(r'[。！？!?]+[」』”’）)]*|(?<![.\d])\.(?=\s|$)')
@@ -11,7 +12,6 @@ ATTACHED_CLAUSE = re.compile(r"^(?:けど|かも|とは|なんて|って|から|
 CLAUSE_END = re.compile(r'(?:ない|たい|だった|です|ます|でしょう|だよ|だね)$')
 OPEN_END = re.compile(r'(?:[、，,:：]|けれど|けど|ながら|そして|なのに|を|[一-龯ァ-ヶ][がのへはに])$')
 WORD_CONTINUES = re.compile(r'^[ぁぃぅぇぉゃゅょっァィゥェォャュョッー]')
-DISCUSSING = re.compile(r'什么意思|どういう意味|歌词的意思|(?:歌词|这句|这段).{0,18}(?:意思|解释|表达了什么|说中|像我的心情)|我(?:今天)?的心情|就是这种心情|形容.{0,10}心情')
 
 
 def normalized(text):
@@ -81,20 +81,59 @@ class Track:
         return positions
 
     def matches(self, key):
+        if not key:
+            return
         ends = self.boundaries
         start = self.key.find(key)
         while start >= 0:
             stop = start + len(key)
             boundary = bisect_left(ends, stop)
-            if boundary < len(ends) and ends[boundary] == stop:
-                first = bisect_right(ends, start) - 1
-                yield first, boundary, ends[first] == start
+            first = bisect_right(ends, start) - 1
+            yield first, boundary, ends[first] == start and ends[boundary] == stop
             start = self.key.find(key, start + 1)
 
     def locate(self, key):
-        start = self.key.find(key)
-        if start >= 0:
-            return bisect_right(self.boundaries, start) - 1, bisect_left(self.boundaries, start + len(key))
+        match = next(self.matches(key), None)
+        return match[:2] if match else None
+
+    def align(self, line_id, keys):
+        locations = self.by_line.get(line_id, [])
+        if not locations:
+            return []
+        lo, hi = min(locations), max(locations) + 1
+        # A translation hit identifies a database line even without original-text overlap.
+        spans = {(lo, hi): 0.0}
+        ends = self.boundaries
+        for key in keys:
+            if not key:
+                continue
+            for first, stop, _ in self.matches(key):
+                if first < hi and stop > lo:
+                    spans[first, stop] = 1.0
+            left = max(0, bisect_right(ends, max(0, ends[lo] - len(key))) - 1)
+            right = min(len(self.phrases), bisect_left(ends, ends[hi] + len(key)))
+            best = None
+            for first, stop in dict.fromkeys(((lo, hi), (left, hi), (lo, right), (left, right))):
+                text = self.key[ends[first]:ends[stop]]
+                matcher = SequenceMatcher(None, key, text, autojunk=False)
+                blocks = [block for block in matcher.get_matching_blocks() if block.size]
+                if not blocks:
+                    continue
+                start_offset = ends[first] + blocks[0].b
+                stop_offset = ends[first] + blocks[-1].b + blocks[-1].size
+                start_phrase = bisect_right(ends, start_offset) - 1
+                stop_phrase = bisect_left(ends, stop_offset)
+                if start_phrase >= hi or stop_phrase <= lo:
+                    continue
+                overlap = sum(block.size for block in blocks)
+                score = max(matcher.ratio(), 0.95 * 2 * overlap / (len(key) + stop_offset - start_offset))
+                candidate = (score, -(stop_phrase - start_phrase), start_phrase, stop_phrase)
+                if best is None or candidate > best:
+                    best = candidate
+            if best:
+                score, _, first, stop = best
+                spans[first, stop] = max(spans.get((first, stop), 0), score)
+        return [(first, stop, score) for (first, stop), score in spans.items()]
 
 
 def split_line(text):
@@ -117,41 +156,3 @@ def split_line(text):
         elif rest and result:
             result[-1] += rest
     return [piece for piece in result if normalized(piece)]
-
-
-def continuation(tracks, enabled, message, history):
-    key = normalized(message)
-    previous = history[-1] if history else {}
-    past_user = next((turn["text"] for turn in reversed(history) if turn["role"] == "user"), "")
-    if DISCUSSING.search(past_user):
-        return None
-    source = previous.get("source") if previous.get("role") == "assistant" else None
-    if len(key) < (2 if source else 4):
-        return None
-    prior_key = normalized(past_user)
-    previous_key = normalized(previous.get("text", ""))
-    matches = []
-    for song_id, track in tracks.items():
-        if (song_id not in enabled or (len(key) < 4 and song_id != source["song_id"])
-                or key not in track.key):
-            continue
-        for first, end, aligned in track.matches(key):
-            phrases = track.phrases
-            forward = bool(source and source["song_id"] == song_id and source["end"] == first - 1
-                           and first > 0 and aligned and previous_key.endswith(phrases[first - 1].key))
-            matched_context = bool(prior_key and prior_key in track.key)
-            next_key = phrases[end].key if end < len(phrases) else None
-            matches.append((song_id, end, aligned, end - first, forward, matched_context, next_key))
-    if not matches:
-        return None
-    confirmed = [hit for hit in matches if hit[4]]
-    contextual = [hit for hit in matches if hit[5]]
-    pool = confirmed or contextual or matches
-    if len({hit[-1] for hit in pool}) != 1:
-        return None
-    hit = max(pool, key=lambda item: (item[4], item[5], item[2], item[3]))
-    song_id, end, aligned, count, forward, same_song, _ = hit
-    # shortcut: use exact phrase boundaries and conservative length until live examples justify fuzzier matching.
-    strong = aligned and (count >= 2 and len(key) >= 8 or len(key) >= 12)
-    automatic = forward or (strong and (not past_user or same_song))
-    return song_id, end, automatic
