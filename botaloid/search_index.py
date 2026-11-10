@@ -1,14 +1,18 @@
-import json
 import logging
 import os
 import re
 import sqlite3
+import sys
 from array import array
+from bisect import bisect_left
 from collections import Counter
 from contextlib import closing, contextmanager
-from dataclasses import dataclass
-from math import sqrt
+from heapq import nlargest, nsmallest
+from itertools import groupby
+from math import log as logarithm, sqrt
+from operator import itemgetter
 from pathlib import Path
+from struct import Struct, error as StructError
 from tempfile import mkstemp
 
 from .lyric_units import Line, normalized
@@ -27,56 +31,28 @@ BEGIN
 END;
 """ for operation in ("INSERT", "UPDATE", "DELETE"))
 
-VECTOR_FORMAT = 1
-FTS_FORMAT = 1
-NGRAM_RANGE = (1, 3)
+INDEX_FORMAT = 1
+MAX_INDEX_TERMS = 100_000
+HEAD_SIZE = 768
 WHITESPACE_RUN = re.compile(r"\s\s+")
+# The document number occupies the high bits of each record so a binary search can use it directly.
+POSTING = Struct("<fI")
+INDEX_SCHEMA = """
+CREATE TABLE metadata (format INTEGER, generation INTEGER, token TEXT, documents INTEGER NOT NULL);
+CREATE TABLE terms (term TEXT PRIMARY KEY, idf REAL NOT NULL, head BLOB, postings BLOB NOT NULL);
+CREATE TABLE lines (doc INTEGER PRIMARY KEY, line_id INTEGER NOT NULL, song_id INTEGER NOT NULL);
+CREATE TABLE song_keys (
+    song_id INTEGER PRIMARY KEY, original TEXT NOT NULL, first INTEGER NOT NULL, stop INTEGER NOT NULL
+);
+"""
 
 
-@dataclass(frozen=True)
-class Index:
-    line_ids: array
-    song_ids: array
-    vectorizer: object
-    matrix: object
+class SearchIndexError(RuntimeError):
+    pass
 
 
-class CachedQueryVectorizer:
-    def __init__(self, vocabulary, idf):
-        self.vocabulary = vocabulary
-        self.idf = idf
-
-    def transform(self, documents):
-        import numpy as np
-        from scipy.sparse import csr_matrix
-
-        columns, data, offsets = [], [], [0]
-        shortest, longest = NGRAM_RANGE
-        for document in documents:
-            text = WHITESPACE_RUN.sub(" ", document.lower())
-            counts = Counter()
-            for width in range(shortest, min(longest, len(text)) + 1):
-                for start in range(len(text) - width + 1):
-                    column = self.vocabulary.get(text[start:start + width])
-                    if column is not None:
-                        counts[column] += 1
-            indices = sorted(counts)
-            weights = np.asarray([counts[i] for i in indices], dtype=np.float32) * self.idf[indices]
-
-            # Match the builder's float32 products and double-precision L2 normalization.
-            squared_norm = 0.0
-            for square in weights * weights:
-                squared_norm += float(square)
-            if squared_norm:
-                weights = (weights.astype(np.float64) / sqrt(squared_norm)).astype(np.float32)
-            columns.extend(indices)
-            data.extend(weights)
-            offsets.append(len(columns))
-        return csr_matrix(
-            (np.asarray(data, dtype=np.float32), np.asarray(columns, dtype=np.int32),
-             np.asarray(offsets, dtype=np.int32)),
-            shape=(len(offsets) - 1, len(self.vocabulary)),
-        )
+class InvalidIndex(sqlite3.DatabaseError):
+    pass
 
 
 def library_revision(db):
@@ -107,14 +83,19 @@ def staging_file(target):
         pending.unlink(missing_ok=True)
 
 
-def remove_old_indexes(target, family, generation):
+def index_path(folder, revision):
+    generation, token = revision
+    return folder / f"search-v{INDEX_FORMAT}-{generation}-{token}.sqlite3"
+
+
+def remove_old_indexes(target, generation):
     try:
-        paths = list(target.parent.glob(f"{family}-v*{target.suffix}"))
+        paths = list(target.parent.glob("search-v*.sqlite3"))
     except OSError:
         return
     for path in paths:
         parts = path.stem.split("-")
-        if len(parts) >= 4 and parts[2].isascii() and parts[2].isdigit() and int(parts[2]) < generation:
+        if len(parts) == 4 and parts[2].isascii() and parts[2].isdigit() and int(parts[2]) < generation:
             try:
                 path.unlink()
             except OSError:
@@ -122,124 +103,223 @@ def remove_old_indexes(target, family, generation):
                 pass
 
 
-def vector_path(folder, revision, max_terms):
-    generation, token = revision
-    return folder / f"tfidf-v{VECTOR_FORMAT}-{generation}-{token}-{max_terms}.npy"
+def gram_counts(text):
+    text = WHITESPACE_RUN.sub(" ", text.lower())
+    return Counter(text[start:start + width] for width in (1, 2, 3)
+                   for start in range(len(text) - width + 1))
 
 
-def save_vector(path, index):
-    import numpy as np
+def documents(db):
+    for line_id, song_id, original, translation in db.execute(
+        "SELECT id,song_id,text,translation FROM lyric_lines ORDER BY song_id,position"
+    ):
+        yield line_id, song_id, normalized(original), normalized(translation or "")
 
-    pipeline = index.vectorizer.named_steps
-    matrix = index.matrix
-    metadata = json.dumps({"key": path.name, "shape": matrix.shape,
-                           "vocabulary": pipeline["countvectorizer"].vocabulary_},
-                          ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    arrays = {
-        "meta": np.frombuffer(metadata, dtype=np.uint8),
-        "data": matrix.data, "indices": matrix.indices, "indptr": matrix.indptr,
-        "line_ids": np.asarray(index.line_ids), "song_ids": np.asarray(index.song_ids),
-        "idf": pipeline["tfidftransformer"].idf_,
+
+def term_idf(db):
+    total = Counter()
+    frequency = Counter()
+    size = 0
+    for _, _, original, translation in documents(db):
+        counts = gram_counts(original + " " + translation)
+        total.update(counts)
+        frequency.update(counts.keys())
+        size += 1
+    terms = nsmallest(MAX_INDEX_TERMS, total, key=lambda term: (-total[term], term))
+    return {term: logarithm((1 + size) / (1 + frequency[term])) + 1 for term in terms}
+
+
+def term_head(postings):
+    if len(postings) > HEAD_SIZE * 2 * POSTING.size:
+        strongest = nlargest(HEAD_SIZE, POSTING.iter_unpack(postings), key=itemgetter(0))
+        return b"".join(POSTING.pack(*hit) for hit in strongest)
+    return None
+
+
+def build_index(db, target, revision):
+    with staging_file(target) as pending, closing(sqlite3.connect(pending)) as index:
+        idf = term_idf(db)
+        postings = {term: bytearray() for term in idf}
+
+        def term_records():
+            for term in sorted(idf):
+                hits = postings.pop(term)
+                yield term, idf[term], term_head(hits), hits
+
+        index.executescript(INDEX_SCHEMA)
+        has_fts = create_fts(index)
+        doc = 0
+        with index:
+            for song_id, group in groupby(documents(db), key=itemgetter(1)):
+                first = doc
+                keys, lines, fts = [], [], []
+                for line_id, _, original, translation in group:
+                    keys.append(original)
+                    lines.append((doc, line_id, song_id))
+                    if has_fts:
+                        fts.append((doc, original, translation))
+                    weights = {term: count * idf[term] for term, count in
+                               gram_counts(original + " " + translation).items() if term in idf}
+                    norm = sqrt(sum(weight * weight for weight in weights.values()))
+                    for term, weight in weights.items():
+                        postings[term].extend(POSTING.pack(weight / norm, doc))
+                    doc += 1
+                index.executemany("INSERT INTO lines VALUES (?,?,?)", lines)
+                index.execute("INSERT INTO song_keys VALUES (?,?,?,?)", (song_id, "".join(keys), first, doc))
+                if fts:
+                    index.executemany("INSERT INTO lyric_fts(rowid,original,translation) VALUES (?,?,?)", fts)
+            index.executemany("INSERT INTO terms VALUES (?,?,?,?)", term_records())
+            index.execute("INSERT INTO metadata VALUES (?,?,?,?)", (INDEX_FORMAT, *(revision or (None, None)), doc))
+            if has_fts:
+                index.execute("INSERT INTO lyric_fts(lyric_fts) VALUES('optimize')")
+
+
+def create_fts(index):
+    try:
+        index.execute("CREATE VIRTUAL TABLE lyric_fts USING fts5(original, translation, tokenize='trigram', content='')")
+    except sqlite3.OperationalError as error:
+        if str(error) not in ("no such module: fts5", "no such tokenizer: trigram"):
+            raise
+        return False
+    return True
+
+
+def open_index(path, revision):
+    index = None
+    try:
+        if path.is_file():
+            index = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+            metadata = index.execute(
+                "SELECT format,generation,token,documents,(SELECT coalesce(max(doc)+1,0) FROM lines) FROM metadata"
+            ).fetchone()
+            if (metadata and metadata[:3] == (INDEX_FORMAT, *(revision or (None, None)))
+                    and type(metadata[3]) is int and 0 <= metadata[3] <= 2**32
+                    and metadata[3] == metadata[4]):
+                index.execute("SELECT term,idf,head,postings FROM terms LIMIT 0").close()
+                index.execute("SELECT song_id,original,first,stop FROM song_keys LIMIT 0").close()
+                return index
+    except (OSError, sqlite3.Error) as error:
+        log.debug("Ignoring unreadable lyric index %s: %s", path, error)
+    if index is not None:
+        index.close()
+    return None
+
+
+def invalid_index(error):
+    code = getattr(error, "sqlite_errorcode", 0) & 255
+    return isinstance(error, InvalidIndex) or code in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB) or str(error) in {
+        "no such table: terms", "no such table: song_keys", "no such table: lines"
     }
-    layout = np.dtype([(name, value.dtype, value.shape) for name, value in arrays.items()], align=True)
-    with staging_file(path) as pending:
-        mapped = np.lib.format.open_memmap(pending, mode="w+", dtype=layout, shape=())
-        for name, value in arrays.items():
-            mapped[name] = value
-        mapped.flush()
-        del mapped
 
 
-def vector_metadata(path):
-    import numpy as np
-    from scipy.sparse import csr_matrix
-
-    mapped = np.load(path, mmap_mode="r", allow_pickle=False)
-    if not isinstance(mapped, np.memmap):
-        if hasattr(mapped, "close"):
-            mapped.close()
-        raise ValueError("expected mapped arrays")
-    if mapped.shape != () or mapped.dtype.names != ("meta", "data", "indices", "indptr", "line_ids", "song_ids", "idf"):
-        raise ValueError("invalid index layout")
-    meta = json.loads(mapped["meta"].tobytes())
-    terms, documents = meta["shape"]
-    vocabulary = meta["vocabulary"]
-    if (meta["key"] != path.name or type(terms) is not int or type(documents) is not int
-            or not isinstance(vocabulary, dict) or terms != len(vocabulary) or terms < 1 or documents < 1
-            or mapped["line_ids"].shape != (documents,) or mapped["song_ids"].shape != (documents,)
-            or mapped["line_ids"].dtype != np.int64 or mapped["song_ids"].dtype != np.int64
-            or mapped["idf"].shape != (terms,) or mapped["idf"].dtype != np.float32
-            or mapped["data"].dtype != np.float32 or mapped["indices"].dtype.kind != "i"
-            or mapped["indptr"].dtype.kind != "i"):
-        raise ValueError("invalid index metadata")
-    seen_columns = bytearray(terms)
-    for column in vocabulary.values():
-        if type(column) is not int or not 0 <= column < terms or seen_columns[column]:
-            raise ValueError("invalid index vocabulary")
-        seen_columns[column] = 1
-    matrix = csr_matrix((mapped["data"], mapped["indices"], mapped["indptr"]),
-                        shape=(terms, documents), copy=False)
-    matrix.check_format(full_check=True)
-    return (terms, documents), vocabulary
+def exact_songs(index, key, pool):
+    return (song_id for song_id, in index.execute(
+        "SELECT song_id FROM song_keys WHERE instr(original,?)>0 ORDER BY song_id", (key,)
+    ) if song_id in pool)
 
 
-def load_vector(path):
-    try:
-        if not path.is_file():
-            return None
-    except OSError:
-        return None
-
-    import numpy as np
-    from scipy.sparse import csr_matrix
-
-    try:
-        # Validate in a separate mapping so the search mapping starts with cold pages.
-        shape, vocabulary = vector_metadata(path)
-        mapped = np.load(path, mmap_mode="r", allow_pickle=False)
-        matrix = csr_matrix((mapped["data"], mapped["indices"], mapped["indptr"]), shape=shape, copy=False)
-        line_ids, song_ids = array("q"), array("q")
-        line_ids.frombytes(mapped["line_ids"].tobytes())
-        song_ids.frombytes(mapped["song_ids"].tobytes())
-        vectorizer = CachedQueryVectorizer(vocabulary, mapped["idf"])
-        return Index(line_ids, song_ids, vectorizer, matrix)
-    except (OSError, EOFError, IndexError, KeyError, OverflowError, TypeError, ValueError) as error:
-        log.debug("Ignoring unreadable lyric vector index %s: %s", path, error)
-        return None
-
-
-def fts_path(folder, revision):
-    generation, token = revision
-    return folder / f"fts-v{FTS_FORMAT}-{generation}-{token}.sqlite3"
-
-
-def build_fts(db, path):
-    with staging_file(path) as pending, closing(sqlite3.connect(pending)) as index:
-        index.execute(
-            "CREATE VIRTUAL TABLE lyric_fts USING fts5(original, translation, tokenize='trigram', content='')"
+def term_rows(index, terms, columns):
+    terms = list(terms)
+    for start in range(0, len(terms), 500):
+        batch = terms[start:start + 500]
+        yield from index.execute(
+            f"SELECT {columns} FROM terms WHERE term IN ({','.join('?' for _ in batch)})", batch
         )
-        index.executemany("INSERT INTO lyric_fts(rowid,original,translation) VALUES (?,?,?)", (
-            (rowid, normalized(text), normalized(translation or ""))
-            for rowid, text, translation in db.execute("SELECT id,text,translation FROM lyric_lines ORDER BY id")
-        ))
-        index.execute("INSERT INTO lyric_fts(lyric_fts) VALUES('optimize')")
-        index.commit()
-        index.execute("VACUUM")
 
 
-def fts_lines(db, path, cue, pool):
-    db.execute("ATTACH DATABASE ? AS botaloid_fts", (path.as_uri() + "?mode=ro",))
+def rerank(index, scores, heads):
+    for term, postings in term_rows(index, heads, "term,postings"):
+        weight, head = heads[term]
+        represented = {doc for doc, _ in head}
+        if len(postings) % POSTING.size:
+            raise InvalidIndex("Invalid postings size")
+        packed = memoryview(postings).cast("Q")
+        if sys.byteorder != "little":
+            packed = array("Q", packed)
+            packed.byteswap()
+        for doc in scores:
+            if doc in represented:
+                continue
+            position = bisect_left(packed, doc << 32)
+            if position < len(packed):
+                component, found = POSTING.unpack_from(postings, position * POSTING.size)
+                if found == doc:
+                    scores[doc] += weight * component
+
+
+def query_scores(index, text, active, limit, use_heads=True):
+    counts = gram_counts(text)
+    columns = "term,idf,head" if use_heads else "term,idf,NULL"
+    features = [(term, counts[term] * idf, head) for term, idf, head in term_rows(index, counts, columns)]
+    norm = sqrt(sum(weight * weight for _, weight, _ in features))
+    scores, heads, full = {}, {}, {}
+    for term, weight, head in features:
+        weight /= norm
+        if head is not None:
+            hits = [(doc, component) for component, doc in POSTING.iter_unpack(head) if active[doc]]
+            if len(hits) >= 2 * limit:
+                heads[term] = (weight, hits)
+                for doc, component in hits:
+                    scores[doc] = scores.get(doc, 0.0) + weight * component
+                continue
+        full[term] = weight
+    for term, postings in term_rows(index, full, "term,postings"):
+        weight = full[term]
+        for component, doc in POSTING.iter_unpack(postings):
+            if active[doc]:
+                scores[doc] = scores.get(doc, 0.0) + weight * component
+    if heads and len(features) > 1:
+        # shortcut: frequent grams seed a bounded shortlist, raise the limit if recall drops.
+        scores = dict(nlargest(2 * limit, scores.items(), key=itemgetter(1)))
+        rerank(index, scores, heads)
+    return nlargest(limit, scores.items(), key=itemgetter(1))
+
+
+def ranked_lines(index, groups, pool, limit):
+    count, = index.execute("SELECT documents FROM metadata").fetchone()
+    active = bytearray(count)
+    allowed = 0
+    for song_id, first, stop in index.execute("SELECT song_id,first,stop FROM song_keys"):
+        if song_id in pool:
+            if not 0 <= first <= stop <= count:
+                raise InvalidIndex("Invalid song range")
+            active[first:stop] = b"\1" * (stop - first)
+            allowed += stop - first
+    shortlists = []
+    for group in groups:
+        best = {}
+        for term in group:
+            try:
+                scores = query_scores(index, term, active, limit, use_heads=allowed * 4 >= count * 3)
+            except (IndexError, StructError) as error:
+                raise InvalidIndex("Invalid postings") from error
+            for doc, score in scores:
+                if score > best.get(doc, 0.0):
+                    best[doc] = score
+        shortlists.append(dict(nlargest(limit, best.items(), key=itemgetter(1))))
+    return shortlists
+
+
+def fts_lines(index, db, cue, pool):
     query = '"' + cue.replace('"', '""') + '"'
+    try:
+        rows = index.execute(
+            "SELECT l.line_id,l.song_id FROM lyric_fts JOIN lines l ON l.doc=lyric_fts.rowid "
+            "WHERE lyric_fts MATCH ? ORDER BY rank", (query,)
+        )
+    except sqlite3.OperationalError as error:
+        if str(error) in ("no such table: lyric_fts", "no such module: fts5", "no such tokenizer: trigram"):
+            return []
+        raise
     matches = []
     seen = set()
     by_song = Counter()
-    with closing(db.execute(
-        "SELECT l.id,l.song_id,l.position,l.stanza,l.text FROM botaloid_fts.lyric_fts "
-        "JOIN lyric_lines l ON l.id=lyric_fts.rowid WHERE lyric_fts MATCH ? ORDER BY rank", (query,)
-    )) as rows:
-        for row in rows:
-            song_id = row["song_id"]
+    with closing(rows):
+        for line_id, song_id in rows:
             if song_id not in pool or by_song[song_id] >= 2:
+                continue
+            row = db.execute("SELECT id,song_id,position,stanza,text FROM lyric_lines WHERE id=?", (line_id,)).fetchone()
+            if row is None or row["song_id"] != song_id:
                 continue
             text = normalized(row["text"])
             if not text or text in seen:

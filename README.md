@@ -12,7 +12,7 @@
 <p align="center">
   <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-ff5500"></a>
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-3776ab">
-  <img alt="技术栈" src="https://img.shields.io/badge/stack-FastAPI%20%2B%20scikit--learn-009688">
+  <img alt="技术栈" src="https://img.shields.io/badge/stack-FastAPI%20%2B%20SQLite-009688">
 </p>
 
 <p align="center">
@@ -116,7 +116,9 @@ flowchart LR
 之后打开[聊天界面](http://127.0.0.1:8765/)，设置页见[设置](http://127.0.0.1:8765/settings)。
 
 > [!NOTE]
-> 默认读取根目录的 `botaloid.sqlite3`；没有该文件时会识别项目改名前的旧版 `vocaloid_rag.sqlite3`。也可用 `BOTALOID_DB` 指定曲库文件。
+> 默认曲库是项目根目录下的 `botaloid.sqlite3`，也可用 `BOTALOID_DB` 指定路径。
+>
+> 缺少索引时，第一次需要索引的查询会等待构建完成。修改歌词或译文后索引会在下一次相关查询时重建。也可以在启动前运行 `.\.venv\Scripts\python -m botaloid.prepare_index botaloid.sqlite3`，将最后一个参数换成实际曲库路径。
 
 设置页可查看、编辑、启用或停用曲目，也可手动新增歌曲。
 
@@ -125,20 +127,13 @@ flowchart LR
 <details>
 <summary>展开查看</summary>
 
-检索索引位于曲库旁的 `<曲库文件名>.botaloid-index/`，按曲库版本命名：
+检索索引位于曲库旁的 `<曲库文件名>.botaloid-index/search-v1-<generation>-<token>.sqlite3`。它保存规范化的整曲原文、字符 1–3 gram 倒排索引和全库 IDF。词表按总词频保留至多 100000 项。高频词项先从高权重命中中筛出候选，再用完整权重重排。查找限定在较小曲目范围内时使用完整倒排表。
 
-- `tfidf-v1-<generation>-<token>-100000.npy`：TF-IDF 稀疏矩阵、vocabulary 与 idf。
-- `fts-v1-<generation>-<token>.sqlite3`：FTS5 trigram 索引，按需构建。
+曲库版本由 `botaloid_lyric_revision` 表与 `lyric_lines` 的写入触发器维护。歌词变更后，网页在下一次需要索引的检索中同步重建，建完后原子替换索引文件。曲目启停、歌名和作者按查询时的曲库状态生效。索引目录不可写时，网页可在系统临时目录准备索引。
 
-曲库版本由 `botaloid_lyric_revision` 表与 `lyric_lines` 上的 INSERT/UPDATE/DELETE 触发器维护；任一歌词行变化后，下一次需要索引的检索会重建。`songs.enabled` 不参与版本计算，检索时按当前启用状态过滤。构建在请求内同步执行：char 1–3 gram，词表上限 100000（超出按总词频保留），4096 行一批，临时文件原子替换。索引按版本命名，其他版本自动清理。
+原文精确查询支持跨行匹配。找歌或找歌词时，如果原文精确匹配未命中、未指定上下句等相对位置，且规范化后的线索至少有 3 个字符，支持 FTS5 trigram 的 SQLite 会对原文和译文做子串检索。需要近似匹配时使用字符倒排索引。命中译文时引用对应的歌词原文。
 
-复用磁盘索引时以 `np.load(mmap_mode="r")` 只读映射，查询使用 NumPy/SciPy 稀疏运算和缓存的 vocabulary/idf；scikit-learn 用于构建。
-
-索引目录不可写时，已存在的可读索引仍会复用；新索引无法落盘时只保留在内存，每个进程启动后重建，FTS5 无法新建时跳过。
-
-FTS5 仅在 `find_song` / `find_lyrics`、用户线索（cue）规范化后至少 3 个字符、内存精确匹配未命中时使用；同时检索原文和译文，返回原文。FTS 索引由规范化后的歌词与译文生成，清理曲库数据时一并删除索引目录。环境不支持或索引损坏时回退向量检索；损坏的 FTS 会在下一次尝试重建。
-
-网页服务启动时，若 `OPENBLAS_NUM_THREADS`、`OPENBLAS_DEFAULT_NUM_THREADS`、`GOTO_NUM_THREADS`、`OMP_NUM_THREADS` 均未设置，则设 `OPENBLAS_NUM_THREADS=1`；该变量需在 import NumPy 前设置。
+索引目录可以从曲库重新生成。
 
 </details>
 
@@ -247,7 +242,9 @@ console.log(result);
 
 ### Python 接入
 
-核心库可用 `python -m pip install .` 安装。创建 `LyricBot` 时传入曲库路径与模型调用函数。以下示例在项目根目录中运行，复用「模型设置」中保存的配置：
+单独嵌入 Python 应用时，在项目根目录运行 `python -m pip install .` 安装核心库。核心库只依赖 Pydantic。创建 `LyricBot` 时传入曲库路径，以及由接入方提供的模型调用函数 `call_model`。
+
+以下示例复用网页「模型设置」中保存的配置。请先通过 `requirements.txt` 安装完整项目依赖，再在项目根目录运行。
 
 ```python
 from botaloid import LyricBot
@@ -266,7 +263,23 @@ print(result)
 
 单独嵌入其他应用时，提供自己的 `call_model(system, prompt, temperature, schema)` 同步函数：将前两个参数分别作为系统消息和用户消息发送给模型，返回解析后的 JSON `dict`；`schema` 可供支持结构化输出的模型使用。模型故障可以抛出 `botaloid.ModelError`。
 
-`reply()` 是同步方法，在异步机器人框架中可用工作线程调用。使用 `bot.initialize()` 初始化曲库后，歌词变更会在下次检索时自动刷新索引。也可调用 `bot.invalidate()` 释放当前实例的检索缓存。
+`reply()` 是同步方法，在异步机器人框架中可用工作线程调用。使用 `bot.initialize()` 初始化曲库后，歌词变更会在下次检索时自动刷新索引。
+
+服务器 bot 可以对准备发布的独立曲库副本预建索引。
+
+```sh
+python -m botaloid.prepare_index botaloid.sqlite3
+```
+
+部署时，将曲库和命令输出的索引文件一起复制，并保留下面的目录结构。
+
+```text
+botaloid.sqlite3
+botaloid.sqlite3.botaloid-index/
+└── search-v1-<generation>-<token>.sqlite3
+```
+
+服务中使用 `LyricBot("botaloid.sqlite3", call_model, read_only=True)` 创建实例，再调用 `initialize()`。缺少可用索引或索引版本与曲库不匹配时，会抛出 `botaloid.SearchIndexError`。更新曲库时，先为新曲库预建索引，再把两者一起部署。
 
 `reply()` 还接受可选的 `original_languages` 和 `translation_languages`，用于告诉模型曲库语言；不传时使用空配置。网页端会从「模型设置 → 曲库语言」自动传入。
 
@@ -292,7 +305,7 @@ Python 和 HTTP 使用相同的数据结构：
 | `ended` | 仅 `status` 为 `ended` 时出现，值为 `true` |
 | `tone` | 本轮语气，传回同一段对话以延续态度 |
 
-HTTP 参数校验失败返回 422；模型调用失败、输出截断或无法解析返回 503。
+HTTP 参数校验失败时返回 `422`。模型调用失败、输出截断或无法解析，以及检索抛出 `SearchIndexError` 时返回 `503`，`detail` 说明原因。
 
 ## 导入自己的数据
 
@@ -355,7 +368,7 @@ HTTP 参数校验失败返回 422；模型调用失败、输出截断或无法�
 ## 上游与感谢
 
 - [FastAPI](https://fastapi.tiangolo.com/)、[Pydantic](https://docs.pydantic.dev/)、[Uvicorn](https://www.uvicorn.org/)：HTTP 服务和数据校验。
-- [scikit-learn](https://scikit-learn.org/)、[NumPy](https://numpy.org/)、[SciPy](https://scipy.org/)：字符 TF-IDF 检索、稀疏矩阵和数值计算。
+- [SQLite](https://www.sqlite.org/) 提供曲库存储、字符倒排索引和 FTS5 子串检索。
 - [Requests](https://requests.readthedocs.io/)、[keyring](https://github.com/jaraco/keyring)：模型与数据请求、系统凭据存储。
 - [Ollama](https://ollama.com/) 及 OpenAI 兼容接口的模型服务。
 - [小赖等宽](https://github.com/lxgw/kose-font/releases/tag/v3.126)：本地界面字体，许可证见 [OFL-Xiaolai.txt](web/assets/fonts/OFL-Xiaolai.txt)。

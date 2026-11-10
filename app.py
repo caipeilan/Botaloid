@@ -1,6 +1,5 @@
 from contextlib import asynccontextmanager, closing
 import ipaddress
-import os
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -12,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 import requests
 
 import model_settings as settings
-from botaloid import LyricBot, ModelError
+from botaloid import LyricBot, ModelError, SearchIndexError
 from botaloid.chat import ChatInput
 
 ROOT = Path(__file__).resolve().parent
@@ -27,9 +26,6 @@ bot = LyricBot(DATABASE)
 
 @asynccontextmanager
 async def lifespan(_app):
-    thread_settings = ("OPENBLAS_NUM_THREADS", "OPENBLAS_DEFAULT_NUM_THREADS", "GOTO_NUM_THREADS", "OMP_NUM_THREADS")
-    if not any(name in os.environ for name in thread_settings):
-        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     bot.initialize()
     yield
 
@@ -88,7 +84,7 @@ def send(payload: ChatInput):
             original_languages=original_languages,
             translation_languages=translation_languages,
         )
-    except ModelError as error:
+    except (ModelError, SearchIndexError) as error:
         raise HTTPException(503, str(error)) from error
 
 

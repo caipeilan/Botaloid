@@ -3,22 +3,22 @@ import logging
 import re
 import sqlite3
 import threading
-from array import array
-from collections import Counter, defaultdict
+from collections import defaultdict
 from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from functools import cache
-from itertools import groupby, islice, zip_longest
+from itertools import zip_longest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Annotated, Literal, get_args
 
 from pydantic import BaseModel, Field, StringConstraints
 
 from . import search_index
 from .lyric_units import Line, Phrase, Track, normalized
-from .search_index import Index
+from .search_index import SearchIndexError
 
 log = logging.getLogger(__name__)
 
@@ -30,9 +30,6 @@ TONES = get_args(Tone)
 Intent = Literal["chat", "sing_along", "find_song", "find_lyrics", "recommend"]
 LOOKUP_INTENTS = ("find_song", "find_lyrics", "recommend")
 Model = Callable[[str, str, float, dict], dict]
-MAX_INDEX_TERMS = 100_000
-INDEX_BATCH_ROWS = 4096
-
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS songs (
     id INTEGER PRIMARY KEY, title TEXT NOT NULL CHECK(length(trim(title))>0),
@@ -284,22 +281,14 @@ def query_groups(plan, message):
 def candidates_for(db, index, enabled, groups, recent, *, distinct=True):
     if not enabled or not groups:
         return []
-    import numpy as np
-
-    vectors = index.vectorizer.transform([term for group in groups for term in group])
-    scores = vectors @ index.matrix
-    active = np.isin(index.song_ids, list(enabled))
-    take = min(120, len(index.line_ids))
-    shortlists = []
-    offset = 0
-    for group in groups:
-        scores_for_group = scores[offset:offset + len(group)].max(axis=0).toarray().ravel()
-        scores_for_group[~active] = 0
-        offset += len(group)
-        shortlists.append({i: scores_for_group[i] for i in np.argpartition(scores_for_group, -take)[-take:]
-                           if scores_for_group[i] > 0})
-
-    ids = {index.line_ids[i] for shortlist in shortlists for i in shortlist}
+    shortlists = search_index.ranked_lines(index, groups, enabled, 120)
+    docs = {doc for shortlist in shortlists for doc in shortlist}
+    if not docs:
+        return []
+    refs = {doc: (line_id, song_id) for doc, line_id, song_id in index.execute(
+        "SELECT doc,line_id,song_id FROM lines WHERE doc IN ("
+        + ",".join("?" for _ in docs) + ")", tuple(docs))}
+    ids = {line_id for line_id, _ in refs.values()}
     if not ids:
         return []
     lines = {row[0]: Line(*row) for row in db.execute(
@@ -310,8 +299,9 @@ def candidates_for(db, index, enabled, groups, recent, *, distinct=True):
     for group, shortlist in zip(groups, shortlists):
         weights = {}
         for i, score in shortlist.items():
-            line = lines.get(index.line_ids[i])
-            if not line or line.song_id != index.song_ids[i]:
+            line_id, song_id = refs.get(i, (None, None))
+            line = lines.get(line_id)
+            if not line or line.song_id != song_id:
                 continue
             original = normalized(line.text)
             weight = score
@@ -325,7 +315,7 @@ def candidates_for(db, index, enabled, groups, recent, *, distinct=True):
     seen, by_song, selected = set(), {}, []
     # Interleave the searches so one direction cannot take every candidate slot.
     for i in (item for layer in zip_longest(*pools) for item in layer if item is not None):
-        line = lines[index.line_ids[i]]
+        line = lines[refs[i][0]]
         key = normalized(line.text)
         identity = key if distinct else line.id
         if not key or identity in seen or (distinct and by_song.get(line.song_id, 0) >= 2):
@@ -569,12 +559,11 @@ def passage(song_id, track, first, stop, relative=None):
     return None
 
 
-def exact_passages(db, ids, keys, relative, song_keys):
+def exact_passages(index, db, ids, keys, relative):
     for key in keys:
         found = []
-        for song_id in ids:
-            if song_keys is not None and key not in song_keys.get(song_id, ""):
-                continue
+        matches = search_index.exact_songs(index, key, ids) if index is not None else ids
+        for song_id in matches:
             track = load_track(db, song_id)
             span = track.locate(key)
             if span:
@@ -636,24 +625,26 @@ def continuation_options(groups, songs, track_for):
 
 
 class LyricBot:
-    def __init__(self, db_path: str | Path, model: Model | None = None):
+    def __init__(self, db_path: str | Path, model: Model | None = None, *, read_only: bool = False):
         self.db_path = Path(db_path).resolve()
         self.model = model
+        self.read_only = read_only
         self.lock = threading.RLock()
-        self._song_keys = None
-        self._index = None
         self._revision = None
-        self._fts_disabled = False
-        self._fts_rebuild = False
+        self._temp_index = None
         self._index_folder = self.db_path.with_name(self.db_path.name + ".botaloid-index")
 
     def connect(self):
-        db = sqlite3.connect(self.db_path, timeout=10, uri=True)
+        path = self.db_path.as_uri() + "?mode=ro" if self.read_only else self.db_path
+        db = sqlite3.connect(path, timeout=10, uri=True)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
         return db
 
     def initialize(self):
+        if self.read_only:
+            self.prepare_index()
+            return
         with closing(self.connect()) as db:
             db.executescript(SCHEMA)
             try:
@@ -665,9 +656,16 @@ class LyricBot:
 
     def invalidate(self):
         with self.lock:
-            self._song_keys = self._index = None
-            self._fts_disabled = False
-            self._fts_rebuild = False
+            if self._temp_index is not None:
+                self._temp_index.cleanup()
+                self._temp_index = None
+
+    def prepare_index(self):
+        with self.lock, closing(self.connect()) as db, db:
+            db.execute("BEGIN")
+            path, index = self._index_for(db, persistent=True, repair=not self.read_only)
+            index.close()
+            return path
 
     def _refresh_revision(self, db):
         revision = search_index.library_revision(db)
@@ -676,104 +674,78 @@ class LyricBot:
             self._revision = revision
         return revision
 
-    def _song_keys_for(self, db):
-        if self._song_keys is None:
-            rows = db.execute("SELECT song_id,text FROM lyric_lines ORDER BY song_id,position")
-            self._song_keys = {
-                song_id: "".join(normalized(text) for _, text in song)
-                for song_id, song in groupby(rows, key=lambda row: row[0])
-            }
-        return self._song_keys
+    def _index_error(self):
+        return SearchIndexError(
+            "找不到可用的同版本检索索引。请先运行 "
+            f'python -m botaloid.prepare_index "{self.db_path}"'
+        )
 
-    def _index_for(self, db):
+    def _index_for(self, db, *, persistent=False, repair=False):
         revision = self._refresh_revision(db)
-        if self._index is not None:
-            return self._index
-        path = search_index.vector_path(self._index_folder, revision, MAX_INDEX_TERMS) if revision else None
+        path = search_index.index_path(self._index_folder, revision) if revision else None
+        if path and not repair and (index := search_index.open_index(path, revision)) is not None:
+            if not self.read_only:
+                search_index.remove_old_indexes(path, revision[0])
+            return path, index
+        if self.read_only or (persistent and path is None):
+            raise self._index_error()
+        if not persistent and not repair and self._temp_index is not None:
+            temporary = Path(self._temp_index.name) / "search.sqlite3"
+            if (index := search_index.open_index(temporary, revision)) is not None:
+                return temporary, index
         if path:
-            self._index = search_index.load_vector(path)
-            if self._index is not None:
-                search_index.remove_old_indexes(path, "tfidf", revision[0])
-                return self._index
-        self._index = self._build_index(db)
-        if path and self._index is not None:
             try:
-                search_index.save_vector(path, self._index)
-                search_index.remove_old_indexes(path, "tfidf", revision[0])
-            except (OSError, ValueError) as error:
-                log.debug("Could not save lyric vector index %s: %s", path, error)
-        return self._index
+                search_index.build_index(db, path, revision)
+            except (OSError, sqlite3.OperationalError) as error:
+                if isinstance(error, sqlite3.Error) and (getattr(error, "sqlite_errorcode", 0) & 255) not in (
+                    sqlite3.SQLITE_CANTOPEN, sqlite3.SQLITE_READONLY, sqlite3.SQLITE_FULL, sqlite3.SQLITE_IOERR
+                ):
+                    raise
+                if persistent:
+                    raise SearchIndexError(f"无法写入检索索引 {path}：{error}") from error
+                log.debug("Could not save lyric index %s: %s", path, error)
+            else:
+                if (index := search_index.open_index(path, revision)) is not None:
+                    search_index.remove_old_indexes(path, revision[0])
+                    return path, index
+                if persistent:
+                    raise self._index_error()
+        if self._temp_index is None:
+            self._temp_index = TemporaryDirectory(prefix="botaloid-index-")
+        temporary = Path(self._temp_index.name) / "search.sqlite3"
+        search_index.build_index(db, temporary, revision)
+        if (index := search_index.open_index(temporary, revision)) is not None:
+            return temporary, index
+        raise self._index_error()
 
-    def _build_index(self, db):
-        import numpy as np
-        from scipy.sparse import vstack
-        from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
-        from sklearn.pipeline import make_pipeline
-
-        def documents():
-            rows = db.execute("SELECT id,song_id,text,translation FROM lyric_lines ORDER BY song_id,position")
-            for line_id, song_id, text, translation in rows:
-                yield line_id, song_id, normalized(text) + " " + normalized(translation or "")
-
-        params = {"analyzer": "char", "ngram_range": search_index.NGRAM_RANGE, "dtype": np.float32}
-        analyze = CountVectorizer(**params).build_analyzer()
-        frequencies = Counter()
-        has_text = False
-        for _, _, document in documents():
-            has_text |= document != " "
-            frequencies.update(analyze(document))
-        if not has_text:
-            return None
-
-        # Pick the same columns as max_features before allocating any count matrix.
-        terms = sorted(frequencies)
-        if len(terms) > MAX_INDEX_TERMS:
-            totals = np.fromiter((frequencies[term] for term in terms), dtype=np.float32, count=len(terms))
-            kept = np.sort((-totals).argsort()[:MAX_INDEX_TERMS])
-            terms = [terms[i] for i in kept]
-        vectorizer = CountVectorizer(**params, vocabulary={term: i for i, term in enumerate(terms)})
-        del frequencies, terms
-
-        line_ids, song_ids = array("q"), array("q")
-        remaining = documents()
-        batches = []
-        while batch := list(islice(remaining, INDEX_BATCH_ROWS)):
-            for line_id, song_id, _ in batch:
-                line_ids.append(line_id)
-                song_ids.append(song_id)
-            batches.append(vectorizer.transform(document for _, _, document in batch))
-        matrix = vstack(batches, format="csr")
-        del batches
-        tfidf = TfidfTransformer().fit(matrix)
-        matrix = tfidf.transform(matrix, copy=False)
-        # Keep terms as CSR rows so every query can use the same sparse layout.
-        return Index(line_ids, song_ids, make_pipeline(vectorizer, tfidf), matrix.T.tocsr())
+    def _query_index(self, db, query, *args):
+        for repair in (False, True):
+            _, index = self._index_for(db, repair=repair)
+            try:
+                with closing(index):
+                    return query(index, *args)
+            except sqlite3.DatabaseError as error:
+                if not search_index.invalid_index(error):
+                    raise
+                if self.read_only or repair:
+                    raise self._index_error() from error
 
     def _fts_quotes(self, db, cue, pool, track_for):
-        if len(cue) < 3 or not self._revision or self._fts_disabled:
+        if len(cue) < 3:
             return []
-        path = search_index.fts_path(self._index_folder, self._revision)
-        try:
-            if self._fts_rebuild or not path.is_file():
-                search_index.build_fts(db, path)
-                search_index.remove_old_indexes(path, "fts", self._revision[0])
-                self._fts_rebuild = False
-            hits = search_index.fts_lines(db, path, cue, pool)
-        except (OSError, sqlite3.Error) as error:
-            code = getattr(error, "sqlite_errorcode", 0) & 255
-            self._fts_rebuild = code in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB)
-            self._fts_disabled = not self._fts_rebuild
-            log.debug("Using vector search after FTS5 lookup failed: %s", error)
-            return []
+        hits = self._query_index(db, search_index.fts_lines, db, cue, pool)
         return quote_options(hits, [[cue]], track_for)
 
     def _retrieve(self, db, enabled, groups, recent, track_for):
-        index = self._index_for(db) if enabled and groups else None
-        return quote_options(candidates_for(db, index, enabled, groups, recent), groups, track_for) if index else []
+        if not enabled or not groups:
+            return []
+        hits = self._query_index(db, lambda index: candidates_for(db, index, enabled, groups, recent))
+        return quote_options(hits, groups, track_for)
 
     def _aligned(self, db, pool, groups, track_for, previous=None):
-        index = self._index_for(db) if groups else None
-        hits = candidates_for(db, index, pool, groups, [], distinct=False) if index else []
+        hits = self._query_index(
+            db, lambda index: candidates_for(db, index, pool, groups, [], distinct=False)
+        ) if groups else []
         keys = list(dict.fromkeys(key for group in groups for key in group))
         ranked = {(previous.song_id, previous.start, previous.start + len(previous.phrases)): 0.25} if previous else {}
         translated_lines = defaultdict(list)
@@ -851,8 +823,10 @@ class LyricBot:
                     return response(intent, tone, fragments=fragments), []
             keys = [key for key in dict.fromkeys((cue, normalized(message))) if key]
             scoped = constraints.keys() & {"title", "author", "reference"}
-            song_keys = self._song_keys_for(db) if keys and not scoped else None
-            exact = exact_passages(db, ids, keys, relative, song_keys)
+            if keys and not scoped:
+                exact = self._query_index(db, exact_passages, db, pool, keys, relative)
+            else:
+                exact = exact_passages(None, db, ids, keys, relative)
             if exact:
                 if intent == "find_song":
                     return response(intent, tone, songs=song_results(db, songs, [q.song_id for q in exact], exact)), []
@@ -928,7 +902,6 @@ class LyricBot:
 
         with self.lock, db:
             db.execute("BEGIN")
-            self._refresh_revision(db)
             songs = enabled_songs(db)
             if intent not in (*LOOKUP_INTENTS, "sing_along"):
                 intent = "chat"

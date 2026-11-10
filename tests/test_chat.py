@@ -48,31 +48,12 @@ class ChatTests(unittest.TestCase):
                 title=f"雨 {number}", author="作者", lyrics=[f"雨がやんだ {number}"]
             ))
         self.db.commit()
-        index = self.bot._index_for(self.db)
         groups = chat.query_groups({"directions": [["雨がやんだ"], ["明日また会おう"]]}, "！")
-        options = chat.candidates_for(self.db, index, set(index.song_ids), groups, [])
+        _, index = self.bot._index_for(self.db)
+        with closing(index):
+            options = chat.candidates_for(self.db, index, chat.enabled_songs(self.db), groups, [])
         self.assertEqual(len(options), 16)
         self.assertIn("明日また会おう", {option[0].text for option in options[:2]})
-
-    def test_batched_vector_index_matches_tfidf_with_feature_limit(self):
-        import numpy as np
-        from sklearn.feature_extraction.text import TfidfVectorizer
-
-        self.db.execute("UPDATE lyric_lines SET translation='静静的夜晚' WHERE song_id=3")
-        self.db.commit()
-        documents = [chat.normalized(text) + " " + chat.normalized(translation or "")
-                     for text, translation in self.db.execute(
-                         "SELECT text,translation FROM lyric_lines ORDER BY song_id,position")]
-        expected = TfidfVectorizer(analyzer="char", ngram_range=(1, 3), dtype=np.float32, max_features=12)
-        matrix = expected.fit_transform(documents)
-        with patch.object(chat, "MAX_INDEX_TERMS", 12), patch.object(chat, "INDEX_BATCH_ROWS", 2):
-            index = self.bot._index_for(self.db)
-
-        self.assertEqual(index.vectorizer.named_steps["countvectorizer"].vocabulary_, expected.vocabulary_)
-        np.testing.assert_allclose(index.matrix.T.toarray(), matrix.toarray(), rtol=1e-6)
-        queries = ["静静的夜晚", "雨が", "明日"]
-        np.testing.assert_allclose(index.vectorizer.transform(queries).toarray(),
-                                   expected.transform(queries).toarray(), rtol=1e-6)
 
     def test_project_intro_searches_for_identity_before_fallback(self):
         self.db.execute("UPDATE lyric_lines SET fallback_kind='default' WHERE song_id=3")
@@ -311,14 +292,13 @@ class ChatTests(unittest.TestCase):
                          ("find_lyrics", "no_match", []))
         self.model.assert_called_once()
 
-    def test_named_lookup_reads_only_that_track_and_skips_vector_index(self):
+    def test_named_lookup_reads_only_that_track_and_skips_index(self):
         self.model.side_effect = [{"intent": "find_lyrics", "directions": []}]
         with patch.object(chat, "load_track", wraps=chat.load_track) as tracks:
             result = self.bot.reply("看一下《海》的歌词")
         self.assertEqual(result["fragments"][0]["title"], "海")
         self.assertEqual({call.args[1] for call in tracks.call_args_list}, {1})
-        self.assertIsNone(self.bot._song_keys)
-        self.assertIsNone(self.bot._index)
+        self.assertFalse(self.bot._index_folder.exists())
 
     def test_unscoped_exact_lookup_spans_lines_after_edit(self):
         self.model.side_effect = lambda system, *_: {
@@ -327,12 +307,10 @@ class ChatTests(unittest.TestCase):
         for first, second in [("街灯を消した。", "夜風が来た。"), ("雨音がした。", "朝が来た。")]:
             with patch.object(app, "bot", self.bot):
                 app.update_song(1, app.SongInput(title="海", author="作者", lyrics=[first, second]))
-            self.assertIsNone(self.bot._song_keys)
             result = self.bot.reply(first + second)
             self.assertEqual(result["fragments"][0]["text"], first + "\n" + second)
-            self.assertIsNone(self.bot._index)
 
-    def test_vector_index_observes_import_edit_and_toggle(self):
+    def test_index_observes_import_edit_and_toggle(self):
         self.model.side_effect = lambda system, *_: (
             {"intent": "chat", "directions": [["玻璃行星"]]} if system == chat.PLAN else {"choices": [1]})
 
@@ -343,10 +321,9 @@ class ChatTests(unittest.TestCase):
             self.assertEqual(self.bot.reply("玻璃行星")["fragments"], [])
             app.import_songs([song("遠くの惑星。")])
             self.assertEqual(self.bot.reply("玻璃行星")["fragments"][0]["text"], "遠くの惑星。")
-            index = self.bot._index
             app.set_enabled(4, app.EnabledInput(enabled=False))
-            self.assertEqual(self.bot.reply("玻璃行星")["fragments"], [])
-            self.assertIs(self.bot._index, index)
+            with patch.object(chat.search_index, "build_index", side_effect=AssertionError("enable toggle rebuilt index")):
+                self.assertEqual(self.bot.reply("玻璃行星")["fragments"], [])
             app.update_song(4, song("新しい惑星。"))
             self.assertEqual(self.bot.reply("玻璃行星")["fragments"][0]["text"], "新しい惑星。")
 
