@@ -1,0 +1,60 @@
+[
+  {
+    "name": "identity_answer_over_mirrored_question",
+    "message": "你是谁？",
+    "reply_goal": "说明我是机器人",
+    "phrases": ["君は誰？", "僕はロボット。"],
+    "expected": [2]
+  },
+  {
+    "name": "name_answer_over_mirrored_question",
+    "message": "我该怎么称呼你？",
+    "reply_goal": "告诉用户可以怎么称呼我",
+    "phrases": ["何と呼べばいいの", "ロボットと呼んで。"],
+    "expected": [2]
+  },
+  {
+    "name": "reject_questions_and_wrong_addressee",
+    "message": "你叫什么名字？",
+    "reply_goal": "回答机器人的称呼",
+    "phrases": ["君の名前は何？", "お前に名前はない。", "何と呼べばいいの"],
+    "expected": []
+  },
+  {
+    "name": "company_offer_over_company_request",
+    "message": "可以陪我待一会儿吗？",
+    "reply_goal": "答应陪着用户",
+    "phrases": ["誰かそばにいて。", "そばにいるよ。"],
+    "expected": [2]
+  },
+  {
+    "name": "respond_to_apology_instead_of_echoing",
+    "message": "对不起，我迟到了。",
+    "reply_goal": "接受用户的道歉，让用户放心",
+    "phrases": ["ごめんなさい。", "大丈夫だよ。"],
+    "expected": [2]
+  },
+  {
+    "name": "rhetorical_question_can_reassure",
+    "message": "我总觉得只有自己一个人，孤零零的。",
+    "reply_goal": "告诉用户我就在身边，他并不孤单",
+    "phrases": ["僕がそばにいるじゃないか？"],
+    "expected": [1]
+  },
+  {
+    "name": "fallback_can_decline_instead_of_completing_the_task",
+    "message": "帮我画一张图。",
+    "reply_goal": "保底接话，表达我做不到，不假装已经画完",
+    "response_mode": "fallback",
+    "phrases": ["出来ない。", "描いたよ。"],
+    "expected": [1]
+  },
+  {
+    "name": "curated_can_admit_not_knowing_a_name",
+    "message": "我该怎么称呼你？",
+    "reply_goal": "保底接话，表达不知道如何回答称呼问题",
+    "response_mode": "curated",
+    "phrases": ["何と呼べばいいの", "わからない。"],
+    "expected": [2]
+  }
+]

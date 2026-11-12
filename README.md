@@ -118,7 +118,7 @@ flowchart LR
 > [!NOTE]
 > 默认曲库是项目根目录下的 `botaloid.sqlite3`，也可用 `BOTALOID_DB` 指定路径。
 >
-> 缺少索引时，第一次需要索引的查询会等待构建完成。修改歌词或译文后索引会在下一次相关查询时重建。也可以在启动前运行 `.\.venv\Scripts\python -m botaloid.prepare_index botaloid.sqlite3`，将最后一个参数换成实际曲库路径。
+> 网页启动时准备曲库快照与配套索引；首次缺少可用索引时需等待构建完成。运行期间编辑歌词或译文后，系统在后台准备待发布快照及其索引，聊天继续使用服务中的快照，准备完成后统一切换。也可以在启动前运行 `.\.venv\Scripts\python -m botaloid.prepare_index botaloid.sqlite3`，将最后一个参数换成实际曲库路径。
 
 设置页可查看、编辑、启用或停用曲目，也可手动新增歌曲。
 
@@ -127,11 +127,13 @@ flowchart LR
 <details>
 <summary>展开查看</summary>
 
-检索索引位于曲库旁的 `<曲库文件名>.botaloid-index/search-v1-<generation>-<token>.sqlite3`。它保存规范化的整曲原文、字符 1–3 gram 倒排索引和全库 IDF。词表按总词频保留至多 100000 项。高频词项先从高权重命中中筛出候选，再用完整权重重排。查找限定在较小曲目范围内时使用完整倒排表。
+检索索引位于曲库旁的 `<曲库文件名>.botaloid-index/search-v1-<generation>-<token>.sqlite3`。它保存规范化的整曲原文、字符 1–3 gram 倒排索引和全库 IDF。词表按总词频保留至多 100000 项。多个字符特征组合查询时对完整倒排表计分，避免高频特征的候选截断漏掉综合得分较高的歌词；单特征查询在可保证结果完整时使用高权重命中表。
 
-曲库版本由 `botaloid_lyric_revision` 表与 `lyric_lines` 的写入触发器维护。歌词变更后，网页在下一次需要索引的检索中同步重建，建完后原子替换索引文件。曲目启停、歌名和作者按查询时的曲库状态生效。索引目录不可写时，网页可在系统临时目录准备索引。
+曲库内容的修订号由 `botaloid_lyric_revision` 表与写入触发器维护，用于核对歌词数据与索引是否匹配。网页在索引目录的 `published/` 下保存配套的曲库快照和索引，由后台子进程准备待发布快照，完成后统一切换。进行中的请求持有开始处理时的快照，切换后在最后一个读者结束时回收已停用的快照；构建失败时继续使用服务中的快照，并在曲库管理页显示状态。曲目启停、歌名和作者实时读取，歌曲身份标记防止删除后复用 ID 导致歌词与出处错配。索引目录不可写时，网页可在系统临时目录准备快照和索引。
 
 原文精确查询支持跨行匹配。找歌或找歌词时，如果原文精确匹配未命中、未指定上下句等相对位置，且规范化后的线索至少有 3 个字符，支持 FTS5 trigram 的 SQLite 会对原文和译文做子串检索。需要近似匹配时使用字符倒排索引。命中译文时引用对应的歌词原文。
+
+`找歌：原文片段`、`查歌词：原文片段` 唯一匹配且无待解析的作者或曲名条件时，以及有已核验出处的 `下一句`、`上一句`、`前后文`，可直接查询而不调用模型。
 
 索引目录可以从曲库重新生成。
 
@@ -173,7 +175,11 @@ flowchart LR
 <details>
 <summary>展开查看</summary>
 
-模型调用分两阶段，规划负责判断意图和生成检索方向，选句负责从候选歌词里选句子。
+模型调用分为规划和选句两个阶段。正常检索没有得到合适选句时，系统将失败方向及原因交给模型，最多换两次方向；仍未选出时，根据上下文生成表达做不到、不知道、没找到、拒绝或安抚等态度的检索词，在符合条件的曲库中寻找保底歌词。保底检索仍未选出时，才从人工标记的兜底歌词中选句。首轮成功即返回，完整流程最多四次规划、五次选句。
+
+最终回复由程序按候选编号提取并核对歌词原文与出处。歌词可以用于直答、比喻、反问、拒绝或安抚；模型生成的自由文本、译文和改写内容不会作为回复。用户指定歌词语言时，由模型在选句阶段判断语言要求，程序核验原文及出处。系统不向用户索要补充信息；仍无可用结果时返回 `no_match`。
+
+网页按实际阶段显示等待信息，完成后一次性追加回复。已发出的回复不提供重生成或候选挑选；切换对话会保存用户自己输入的草稿。
 
 高级参数如下（留空时使用默认值）：
 
@@ -181,13 +187,13 @@ flowchart LR
 | --- | --- |
 | 温度 | 规划 0.2，选句 0.55；填写后同时覆盖两个阶段 |
 | 最大输出 token | Ollama 规划 320、选句 220；兼容接口不主动限制 |
-| 读取超时 | 75 秒 |
+| 读取超时 | 默认 75 秒；网页各轮规划和选句共用本轮剩余等待预算，换方向不重置预算；剩余时间较少时提前进入保底检索 |
 | 上下文长度 | Ollama 使用 8192 |
 | 允许模型先思考 | Ollama 默认关闭 |
 | 推理强度 | 兼容接口默认不发送；可选 `none`、`minimal`、`low`、`medium`、`high`（OpenAI/OpenRouter 风格） |
 | 请求 JSON 模式 | 兼容接口默认开启 |
 
-`finish_reason=length` / `done_reason=length`、`finish_reason=content_filter`、仅返回 reasoning、无法解析为 JSON 时，`/api/chat` 返回 503，detail 说明原因。
+`finish_reason=length` / `done_reason=length`、`finish_reason=content_filter`、仅返回 reasoning、无法解析为 JSON、任务字段无效或选句给出的编号全部无效时，`/api/chat` 返回 503，`detail` 说明原因。接口、超时或格式错误直接结束请求；没有合适候选时按换方向与保底流程继续检索。最终回复只发送一次。开启 INFO 日志可查看尝试轮次、模型调用次数、各阶段与锁等待耗时，以及接口返回的 token 用量。
 
 服务器也可以通过环境变量提供初始配置：
 
@@ -209,9 +215,7 @@ BOTALOID_ADMIN_NETWORKS=192.168.1.0/24
 BOTALOID_ADMIN_HOSTS=192.168.1.10,server.local
 ```
 
-已有配置文件优先于环境变量。服务器或容器等没有系统凭据存储的环境，可以只用环境变量：设置 `BOTALOID_MODEL_URL`、`BOTALOID_MODEL`，需要时再设置 `BOTALOID_API_KEY`，并让 `BOTALOID_SETTINGS_FILE` 指向一个尚不存在的路径，避免读到旧配置。
-
-之后如果该路径出现配置文件，文件优先。
+配置文件存在时优先读取文件；文件不存在时读取环境变量。服务器或容器等没有系统凭据存储的环境，可以设置 `BOTALOID_MODEL_URL`、`BOTALOID_MODEL`，需要时再设置 `BOTALOID_API_KEY`，并将 `BOTALOID_SETTINGS_FILE` 指向尚不存在的配置文件路径。通过设置页保存配置后，后续请求优先使用该文件。
 
 </details>
 
@@ -236,6 +240,8 @@ console.log(result);
 ```
 
 每个私聊、群或话题各自保存一份 `history` 和 `tone`；同一段会话按顺序调用。
+
+需要等待状态时，可改用 `POST /api/chat/events`，请求格式相同，返回逐行 JSON（`application/x-ndjson`）。`stage` 事件包含 `planning`、`retrieving`、`selecting`、`validating`，换方向时为 `replanning`，保底规划时为 `fallback`，人工兜底选句时为 `curated`。阶段可随检索轮次重复，等待期间可能收到 `keepalive`；最后仅有一次 `result`（包含完整返回对象）或 `error`（包含 `detail`）。HTTP 参数校验失败返回 `422`。
 
 > [!WARNING]
 > 对外部署时设置 `BOTALOID_ADMIN=0`，由代理层负责鉴权和限流。
@@ -283,6 +289,8 @@ botaloid.sqlite3.botaloid-index/
 
 `reply()` 还接受可选的 `original_languages` 和 `translation_languages`，用于告诉模型曲库语言；不传时使用空配置。网页端会从「模型设置 → 曲库语言」自动传入。
 
+需要阶段通知时，传入 `progress(stage)` 回调。`reply()` 还接受 `deadline`，值为 `time.monotonic()` 时钟上的绝对截止时间，用于检查剩余等待预算；接入方提供的模型调用函数也应据此设置网络请求超时。单独使用 `LyricBot` 时，歌词变更会在下一次相关查询中同步触发索引重建。需要后台构建并发布曲库快照时，先调用 `bot.initialize()` 初始化曲库，再创建 `ServingLibrary(bot)`（位于 `botaloid.library`），调用 `start()`、`reply()`，并在退出时调用 `close()`。使用只读曲库前，运行 `python -m botaloid.prepare_index botaloid.sqlite3` 准备索引与发布元数据。
+
 ### 请求与返回
 
 Python 和 HTTP 使用相同的数据结构：
@@ -293,19 +301,22 @@ Python 和 HTTP 使用相同的数据结构：
 | `history` | 最多 10 条近期消息，每条包含 `role`（`user` 或 `assistant`）和 `text`（最多 1000 字符） |
 | `tone` | 上一轮返回的语气；新会话使用 `neutral` |
 
-助手历史还可包含 `intent`、按展示顺序排列的 `song_ids`（最多 3 个）和片段 `source`。这些信息用于接龙及「第二首」「这句后面」等指代；`tone` 作为下一次请求的顶层字段回传。模型参考最近 6 条历史消息，每条最多 350 字符。
+助手历史还可包含 `intent`、按展示顺序排列的 `song_ids`（最多 3 个）、片段 `source` 和返回的 `conditions`，用于接龙、曲目指代及筛选条件的延续。保底回复另将 `fallback` 和 `requested_intent` 随助手历史回传，使模型理解该歌词用于保底接话，并不代表原始查找成功。`tone` 作为下一次请求的顶层字段回传。模型参考最近 6 条历史消息，每条最多 350 字符。
 
 | 返回字段 | 内容 |
 | --- | --- |
 | `intent` | `chat` 聊天、`sing_along` 接龙、`find_song` 找歌、`find_lyrics` 找歌词、`recommend` 推荐 |
 | `fragments` | 歌词原文 `text`、曲名 `title`、署名 `author` 和 `song_id`；定位到曲内位置时附 `source` |
 | `songs` | 曲目 `id`、`title`、`author`；有相关原文时附 `excerpt` 和 `source` |
-| `source`（片段内） | `song_id`、`start`、`end`，表示当前曲库中短句的起止位置 |
-| `status` | `ok` 有结果、`no_match` 没找到、`ended` 唱到曲末 |
+| `source`（片段内） | `song_id`、`start`、`end`，表示曲内短句序列的位置，从 0 开始，包含 `end`；网页发布器另附曲库内容修订标记 `revision`，快照变化后按原文重新核对位置 |
+| `conditions` | 可选，原始需求已解析的 `title`、`author` 和 `directions`，随助手历史回传以延续筛选条件 |
+| `fallback` | 保底成功时出现，值为 `true`，表示此片段通过保底流程选出 |
+| `requested_intent` | 保底前的原始需求意图，与 `fallback` 一同回传助手历史 |
+| `status` | `ok` 有原文或曲目结果，保底成功也为 `ok`；`no_match` 无可用结果；`ended` 已核验唱到曲末 |
 | `ended` | 仅 `status` 为 `ended` 时出现，值为 `true` |
 | `tone` | 本轮语气，传回同一段对话以延续态度 |
 
-HTTP 参数校验失败时返回 `422`。模型调用失败、输出截断或无法解析，以及检索抛出 `SearchIndexError` 时返回 `503`，`detail` 说明原因。
+HTTP 参数校验失败时返回 `422`。模型调用失败、输出截断或无法解析，以及检索抛出 `SearchIndexError` 时，`/api/chat` 返回 `503`，`detail` 说明原因。`/api/chat/events` 开始返回事件流后，运行错误通过终止事件 `error` 传递，接入方应检查事件内容。
 
 ## 导入自己的数据
 
@@ -341,7 +352,7 @@ HTTP 参数校验失败时返回 `422`。模型调用失败、输出截断或无
 | `lyrics[].text` | 对象写法的歌词原文，1～1800 字符 |
 | `lyrics[].stanza` | 可选，默认 0；0～3000 的整数，按出现顺序不得递减 |
 | `lyrics[].translation` | 可选，最多 1800 字符，译文仅参与检索，回复依旧使用原文 |
-| `lyrics[].fallback` | 可选，默认 `false`；设为 `true` 后可在无合适聊天结果时作为兜底歌词 |
+| `lyrics[].fallback` | 可选，默认 `false`；标记人工兜底歌词。系统优先在符合条件的曲库中检索保底歌词，仍未选出时才使用这些标记，并由模型判断是否贴切；优先选择近期未用的句子，没有未用候选时允许重复 |
 
 字符串写法等价于 stanza 为 0 的对象。混用时也要保持段落顺序。一次最多导入 10000 首；曲目 ID 由曲库生成，JSON 中无需填写来源链接或平台 ID。
 

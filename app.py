@@ -1,10 +1,15 @@
 from contextlib import asynccontextmanager, closing
 import ipaddress
+import json
+import logging
+import queue
+import threading
+import time
 from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
@@ -13,6 +18,7 @@ import requests
 import model_settings as settings
 from botaloid import LyricBot, ModelError, SearchIndexError
 from botaloid.chat import ChatInput
+from botaloid.library import ServingLibrary
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -22,12 +28,21 @@ if not DEFAULT_DATABASE.exists() and (ROOT / "vocaloid_rag.sqlite3").exists():
 DATABASE = Path(settings.environment_value("DB", DEFAULT_DATABASE))
 ADMIN = settings.environment_value("ADMIN", "1") == "1"
 bot = LyricBot(DATABASE)
+library = None
+log = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(_app):
+    global library
     bot.initialize()
-    yield
+    library = ServingLibrary(bot)
+    library.start()
+    try:
+        yield
+    finally:
+        library.close()
+        library = None
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -69,23 +84,70 @@ def config(request: Request):
 
 @app.post("/api/chat")
 def send(payload: ChatInput):
+    return run_chat(payload)
+
+
+def run_chat(payload, progress=None):
     loaded, original_languages, translation_languages = settings.active_runtime()
     connection = None
+    timeout = loaded.profile(loaded.active).timeout or settings.DEFAULT_TIMEOUT
+    deadline = time.monotonic() + timeout
 
     def model(*args):
         nonlocal connection
         if connection is None:
             connection = settings.connection_for(loaded)
-        return settings.request_model(connection, *args)
+        return settings.request_model(connection, *args, session=session, deadline=deadline)
 
     try:
-        return bot.reply(
-            payload.message, payload.history, payload.tone, model=model,
-            original_languages=original_languages,
-            translation_languages=translation_languages,
-        )
+        with requests.Session() as session:
+            serving = library if library is not None and library.source is bot else bot
+            return serving.reply(
+                payload.message, payload.history, payload.tone, model=model,
+                original_languages=original_languages,
+                translation_languages=translation_languages, progress=progress, deadline=deadline,
+            )
     except (ModelError, SearchIndexError) as error:
         raise HTTPException(503, str(error)) from error
+
+
+@app.post("/api/chat/events")
+def chat_events(payload: ChatInput):
+    events = queue.Queue()
+    disconnected = threading.Event()
+
+    def progress(stage):
+        if disconnected.is_set():
+            raise ModelError("请求已结束。")
+        events.put({"type": "stage", "stage": stage})
+
+    def reply():
+        try:
+            result = run_chat(payload, progress)
+            if not disconnected.is_set():
+                events.put({"type": "result", "result": result})
+        except HTTPException as error:
+            events.put({"type": "error", "detail": error.detail})
+        except Exception:
+            log.exception("Chat request failed")
+            events.put({"type": "error", "detail": "服务暂时不可用。"})
+
+    def stream():
+        threading.Thread(target=reply, daemon=True, name="lyric-chat").start()
+        try:
+            while True:
+                try:
+                    event = events.get(timeout=10)
+                except queue.Empty:
+                    event = {"type": "keepalive"}
+                yield json.dumps(event, ensure_ascii=False) + "\n"
+                if event["type"] in ("result", "error"):
+                    return
+        finally:
+            disconnected.set()
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson",
+                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 DEFAULT_ADMIN_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "0.0.0.0", "::"})
@@ -331,12 +393,23 @@ def write_song(db, payload, song_id=None):
     return song_id, existing != incoming
 
 
+def refresh_library():
+    if library is not None and library.source is bot:
+        library.refresh()
+
+
+@admin.get("/api/library-status")
+def library_status():
+    return library.status() if library is not None and library.source is bot else {"state": "ready", "detail": ""}
+
+
 @admin.post("/api/songs", status_code=201)
 def create_song(payload: SongInput):
     with bot.lock, closing(bot.connect()) as db:
         with db:
             song_id, _ = write_song(db, payload)
         bot.invalidate()
+    refresh_library()
     return {"id": song_id}
 
 
@@ -347,6 +420,8 @@ def update_song(song_id: int, payload: SongInput):
             _, changed = write_song(db, payload, song_id)
         if changed:
             bot.invalidate()
+    if changed:
+        refresh_library()
     return {"id": song_id}
 
 
@@ -365,6 +440,7 @@ def import_songs(payload: Annotated[list[SongInput], Field(min_length=1, max_len
             for item in payload:
                 write_song(db, item)
         bot.invalidate()
+    refresh_library()
     return {"count": len(payload)}
 
 

@@ -33,6 +33,40 @@ export async function api(url, method = "GET", data) {
   return result;
 }
 
+export async function chat(data, onStage, signal) {
+  const response = await fetch("/api/chat/events", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(data), signal,
+  });
+  if (!response.ok) {
+    const result = await response.json().catch(() => ({}));
+    throw new Error(typeof result.detail === "string" ? result.detail : "请求失败。");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const {value, done} = await reader.read();
+      buffer += decoder.decode(value, {stream: !done});
+      let end;
+      while ((end = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, end).trim();
+        buffer = buffer.slice(end + 1);
+        if (!line) continue;
+        const event = JSON.parse(line);
+        if (event.type === "stage") onStage(event.stage);
+        else if (event.type === "result") return event.result;
+        else if (event.type === "error") throw new Error(event.detail);
+      }
+      if (done) throw new Error("连接已中断，本次回复未完成。");
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 export function notice(element, text = "", error = false) {
   element.hidden = !text;
   element.textContent = text;

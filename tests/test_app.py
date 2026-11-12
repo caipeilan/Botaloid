@@ -35,7 +35,7 @@ class StartupTests(unittest.TestCase):
             async with app.lifespan(app.app):
                 initialize.assert_called_once_with()
 
-        with patch.object(app.bot, "initialize") as initialize:
+        with patch.object(app.bot, "initialize") as initialize, patch.object(app, "ServingLibrary"):
             asyncio.run(start())
 
 

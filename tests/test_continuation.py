@@ -221,14 +221,19 @@ class FuzzyContinuationTests(unittest.TestCase):
         self.song("短", ["愛", "夢へ向かおう。"])
         with patch.object(chat, "model_json", return_value={"intent": "sing_along", "directions": []}) as calls:
             result = self.bot.reply("！！")
-        self.assertEqual((result["intent"], result["status"], calls.call_count), ("chat", "no_match", 1))
+        self.assertEqual((result["intent"], result["status"], calls.call_count), ("chat", "no_match", 4))
         for choices in [[999], [0], [-1], [1.5], [True], [{"id": "bogus"}], []]:
             with self.subTest(choices=choices):
-                with patch.object(chat, "model_json", side_effect=[
-                    {"intent": "sing_along", "directions": []}, {"choices": choices}]):
-                    result = self.bot.reply("愛")
-                self.assertEqual((result["intent"], result["status"], result["fragments"]),
-                                 ("chat", "no_match", []))
+                with patch.object(chat, "model_json", side_effect=lambda system, *_: {
+                    "intent": "sing_along", "directions": []
+                } if system == chat.PLAN else {"choices": choices}):
+                    if choices:
+                        with self.assertRaises(chat.ModelError):
+                            self.bot.reply("愛")
+                    else:
+                        result = self.bot.reply("愛")
+                        self.assertEqual((result["intent"], result["status"], result["fragments"]),
+                                         ("chat", "no_match", []))
 
     def test_end_of_song_is_selected_and_verified(self):
         self.song("终", ["月明かりだけを頼りに歩く。"])

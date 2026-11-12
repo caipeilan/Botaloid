@@ -16,6 +16,28 @@ let lastList = 0;
 let editing = null;
 let fallbackChanged = false;
 let debounce;
+let indexTimer;
+let indexUpdating = false;
+
+async function indexStatus() {
+  clearTimeout(indexTimer);
+  try {
+    const {state, detail} = await api("/api/library-status");
+    if (state === "building") {
+      indexUpdating = true;
+      notice(libraryStatus, "正在更新曲库，聊天继续使用上一版。");
+      indexTimer = setTimeout(indexStatus, 1200);
+    } else if (state === "error") {
+      indexUpdating = false;
+      notice(libraryStatus, detail, true);
+    } else if (indexUpdating) {
+      indexUpdating = false;
+      notice(libraryStatus, "曲库已更新。");
+    }
+  } catch (error) {
+    if (indexUpdating) notice(libraryStatus, error.message, true);
+  }
+}
 
 function listRow(item) {
   const row = el("tr");
@@ -182,6 +204,7 @@ byId("song-form").addEventListener("submit", async event => {
       {title, author, enabled: byId("enabled").checked, lyrics: lines});
     closeEditor();
     notice(libraryStatus, "已保存。");
+    indexStatus();
     loadList();
   } catch (error) {
     notice(editorStatus, error.message, true);
@@ -211,6 +234,7 @@ file.addEventListener("change", async () => {
     if (!Array.isArray(data) || !data.length) throw new Error("文件中需要有歌曲列表。");
     const {count} = await api("/api/import", "POST", data);
     notice(libraryStatus, "已导入 " + count + " 首。");
+    indexStatus();
     loadList();
   } catch (error) {
     notice(libraryStatus, error.message, true);
@@ -220,3 +244,4 @@ file.addEventListener("change", async () => {
 });
 
 loadList();
+indexStatus();

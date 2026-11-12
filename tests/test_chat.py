@@ -70,17 +70,17 @@ class ChatTests(unittest.TestCase):
             reply = self.bot.reply("你可以简单介绍这个项目吗？")
         self.assertEqual(reply["fragments"][0]["text"], "私はロボット")
 
-    def test_fallback_is_used_after_candidate_rejection(self):
+    def test_candidate_rejection_returns_no_match_without_random_fallback(self):
         self.db.execute("UPDATE lyric_lines SET fallback_kind='default' WHERE song_id=3")
         self.db.commit()
         self.db.commit()
-        with patch.object(chat, "model_json", side_effect=[
-            {"directions": [["雨がやんだ"]], "tone": "absurd"},
-            {"choices": []},
-        ]) as model:
+        with patch.object(chat, "model_json", side_effect=lambda system, *_: {
+            "directions": [["雨がやんだ"]], "tone": "absurd"
+        } if system == chat.PLAN else {"choices": []}) as model:
             reply = self.bot.reply("写一个鹈鹕骑单车的 SVG")
-        self.assertEqual(model.call_count, 2)
-        self.assertEqual(reply["fragments"], [{"text": "静かな夜", "title": "舟", "author": "作者", "song_id": 3}])
+        self.assertEqual(model.call_count, 7)
+        self.assertEqual(reply["fragments"], [])
+        self.assertEqual(reply["status"], "no_match")
 
 
     def test_singing_matches_different_line_breaks_and_selects_a_continuation(self):
@@ -175,7 +175,7 @@ class ChatTests(unittest.TestCase):
             {"role": "user", "text": "推荐两首"},
             {"role": "assistant", "text": "《一》\n《二》", "song_ids": [first, second], "intent": "recommend"},
         ]
-        self.model.side_effect = [{"intent": "find_song", "reference": "2", "directions": []}]
+        self.model.side_effect = [{"intent": "find_song", "tone": "neutral", "reference": "2", "directions": []}]
         result = self.bot.reply("第二首是什么歌？", history)
         self.assertEqual((result["intent"], [song["id"] for song in result["songs"]]),
                          ("find_song", [second]))
@@ -208,10 +208,10 @@ class ChatTests(unittest.TestCase):
         ))
         self.db.commit()
         self.model.side_effect = [
-            {"intent": "find_song", "cue": lyric},
-            {"intent": "find_lyrics", "reference": 1, "relative": "after"},
-            {"intent": "find_lyrics", "cue": lyric, "title": "月", "relative": "before"},
-            {"intent": "sing_along", "cue": lyric, "directions": []},
+            {"intent": "find_song", "tone": "neutral", "directions": [], "cue": lyric},
+            {"intent": "find_lyrics", "tone": "neutral", "directions": [], "reference": 1, "relative": "after"},
+            {"intent": "find_lyrics", "tone": "neutral", "directions": [], "cue": lyric, "title": "月", "relative": "before"},
+            {"intent": "sing_along", "tone": "neutral", "cue": lyric, "directions": []},
             {"choices": [1]},
         ]
         history = [{"role": "user", "text": "我只记得这几句歌词，想知道是哪首。"}]
@@ -241,12 +241,12 @@ class ChatTests(unittest.TestCase):
 
         def model(_system, prompt, _temperature, schema):
             if schema is chat.PLAN_SCHEMA:
-                return {"intent": "recommend", "directions": [["夜道を歩く", "夜道"]]}
+                return {"intent": "recommend", "tone": "neutral", "directions": [["夜道を歩く", "夜道"]]}
             candidates = re.findall(r"^候选 (\d+)（《(.+?)》", prompt, re.MULTILINE)
             self.assertEqual(len(candidates), len({title for _, title in candidates}))
             ids = {title: int(i) for i, title in candidates}
             self.assertNotIn("停用", ids)
-            return {"choices": [999, ids["夜道"], ids["夜道"], ids["夜空"]], "text": "模型自写"}
+            return {"choices": [999, ids["夜道"], ids["夜空"]], "text": "模型自写"}
 
         self.model.side_effect = model
         result = self.bot.reply("想听几首写夜里散步的歌")
@@ -259,7 +259,7 @@ class ChatTests(unittest.TestCase):
         self.db.execute("UPDATE songs SET enabled=0 WHERE id=1")
         self.db.execute("UPDATE lyric_lines SET fallback_kind='default' WHERE song_id=3")
         self.db.commit()
-        self.model.side_effect = [{"intent": "find_song", "title": "海", "directions": []}]
+        self.model.side_effect = [{"intent": "find_song", "tone": "neutral", "title": "海", "directions": []}]
         result = self.bot.reply("找《海》这首歌")
         self.assertEqual((result["status"], result["intent"], result["songs"], result["fragments"]),
                          ("no_match", "find_song", [], []))
@@ -284,16 +284,18 @@ class ChatTests(unittest.TestCase):
         self.assertEqual((result["intent"], result["songs"]), ("recommend", []))
 
     def test_asking_after_verified_last_line_stays_on_that_song(self):
-        self.model.side_effect = [{"intent": "find_lyrics", "relative": "after", "directions": [["夜"]]}]
+        self.model.side_effect = lambda system, *_: {
+            "intent": "find_lyrics", "tone": "neutral", "relative": "after", "directions": [["夜"]]
+        } if system == chat.PLAN else {"choices": []}
         result = self.bot.reply("这句后面唱什么？", [
             {"role": "assistant", "text": "静かな夜", "source": {"song_id": 3, "end": 0}},
         ])
         self.assertEqual((result["intent"], result["status"], result["fragments"]),
                          ("find_lyrics", "no_match", []))
-        self.model.assert_called_once()
+        self.assertEqual(self.model.call_count, 3)
 
     def test_named_lookup_reads_only_that_track_and_skips_index(self):
-        self.model.side_effect = [{"intent": "find_lyrics", "directions": []}]
+        self.model.side_effect = [{"intent": "find_lyrics", "tone": "neutral", "directions": []}]
         with patch.object(chat, "load_track", wraps=chat.load_track) as tracks:
             result = self.bot.reply("看一下《海》的歌词")
         self.assertEqual(result["fragments"][0]["title"], "海")
@@ -302,7 +304,7 @@ class ChatTests(unittest.TestCase):
 
     def test_unscoped_exact_lookup_spans_lines_after_edit(self):
         self.model.side_effect = lambda system, *_: {
-            "intent": "find_lyrics", "directions": [],
+            "intent": "find_lyrics", "tone": "neutral", "directions": [],
         } if system == chat.PLAN else self.fail("expected an exact match")
         for first, second in [("街灯を消した。", "夜風が来た。"), ("雨音がした。", "朝が来た。")]:
             with patch.object(app, "bot", self.bot):
@@ -312,7 +314,7 @@ class ChatTests(unittest.TestCase):
 
     def test_index_observes_import_edit_and_toggle(self):
         self.model.side_effect = lambda system, *_: (
-            {"intent": "chat", "directions": [["玻璃行星"]]} if system == chat.PLAN else {"choices": [1]})
+            {"intent": "chat", "tone": "neutral", "directions": [["玻璃行星"]]} if system == chat.PLAN else {"choices": [1]})
 
         def song(text):
             return app.SongInput(title="星", author="作者", lyrics=[{"text": text, "translation": "玻璃行星"}])
@@ -360,12 +362,12 @@ class ChatTests(unittest.TestCase):
         self.assertIn('"translation_languages": []', prompt)
 
     def test_instances_use_their_own_models_and_libraries(self):
-        other_model = Mock(side_effect=[{"intent": "chat", "directions": [["森の向こう"]]}, {"choices": [1]}])
+        other_model = Mock(side_effect=[{"intent": "chat", "tone": "neutral", "directions": [["森の向こう"]]}, {"choices": [1]}])
         other = LyricBot(self.folder / "other.sqlite3", other_model)
         other.initialize()
         with closing(other.connect()) as db, db:
             app.write_song(db, app.SongInput(title="森", author="別の作者", lyrics=["森の向こうへ行こう。"]))
-        self.model.side_effect = [{"intent": "chat", "directions": [["雨がやんだ"]]}, {"choices": [1]}]
+        self.model.side_effect = [{"intent": "chat", "tone": "neutral", "directions": [["雨がやんだ"]]}, {"choices": [1]}]
         self.assertEqual(self.bot.reply("回一句")["fragments"][0]["title"], "海")
         self.assertEqual(other.reply("回一句")["fragments"][0]["title"], "森")
         self.assertEqual((self.model.call_count, other_model.call_count), (2, 2))

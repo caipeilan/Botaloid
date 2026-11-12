@@ -2,9 +2,6 @@ import logging
 import os
 import re
 import sqlite3
-import sys
-from array import array
-from bisect import bisect_left
 from collections import Counter
 from contextlib import closing, contextmanager
 from heapq import nlargest, nsmallest
@@ -29,13 +26,32 @@ CREATE TRIGGER IF NOT EXISTS botaloid_lyric_{operation.lower()} AFTER {operation
 BEGIN
     UPDATE botaloid_lyric_revision SET generation=generation+1, token=lower(hex(randomblob(16)));
 END;
-""" for operation in ("INSERT", "UPDATE", "DELETE"))
+""" for operation in ("INSERT", "UPDATE", "DELETE")) + """
+CREATE TABLE IF NOT EXISTS botaloid_song_identity (
+    song_id INTEGER PRIMARY KEY, token TEXT NOT NULL
+);
+UPDATE botaloid_lyric_revision SET generation=generation+1,token=lower(hex(randomblob(16)))
+WHERE EXISTS (SELECT 1 FROM songs WHERE NOT EXISTS
+    (SELECT 1 FROM botaloid_song_identity WHERE song_id=songs.id));
+INSERT INTO botaloid_song_identity
+SELECT id,lower(hex(randomblob(16))) FROM songs
+WHERE NOT EXISTS (SELECT 1 FROM botaloid_song_identity WHERE song_id=songs.id);
+CREATE TRIGGER IF NOT EXISTS botaloid_song_insert AFTER INSERT ON songs
+BEGIN
+    INSERT OR REPLACE INTO botaloid_song_identity VALUES (new.id,lower(hex(randomblob(16))));
+    UPDATE botaloid_lyric_revision SET generation=generation+1,token=lower(hex(randomblob(16)));
+END;
+CREATE TRIGGER IF NOT EXISTS botaloid_song_delete AFTER DELETE ON songs
+BEGIN
+    DELETE FROM botaloid_song_identity WHERE song_id=old.id;
+    UPDATE botaloid_lyric_revision SET generation=generation+1,token=lower(hex(randomblob(16)));
+END;
+"""
 
 INDEX_FORMAT = 1
 MAX_INDEX_TERMS = 100_000
 HEAD_SIZE = 768
 WHITESPACE_RUN = re.compile(r"\s\s+")
-# The document number occupies the high bits of each record so a binary search can use it directly.
 POSTING = Struct("<fI")
 INDEX_SCHEMA = """
 CREATE TABLE metadata (format INTEGER, generation INTEGER, token TEXT, documents INTEGER NOT NULL);
@@ -227,38 +243,18 @@ def term_rows(index, terms, columns):
         )
 
 
-def rerank(index, scores, heads):
-    for term, postings in term_rows(index, heads, "term,postings"):
-        weight, head = heads[term]
-        represented = {doc for doc, _ in head}
-        if len(postings) % POSTING.size:
-            raise InvalidIndex("Invalid postings size")
-        packed = memoryview(postings).cast("Q")
-        if sys.byteorder != "little":
-            packed = array("Q", packed)
-            packed.byteswap()
-        for doc in scores:
-            if doc in represented:
-                continue
-            position = bisect_left(packed, doc << 32)
-            if position < len(packed):
-                component, found = POSTING.unpack_from(postings, position * POSTING.size)
-                if found == doc:
-                    scores[doc] += weight * component
-
-
 def query_scores(index, text, active, limit, use_heads=True):
     counts = gram_counts(text)
     columns = "term,idf,head" if use_heads else "term,idf,NULL"
     features = [(term, counts[term] * idf, head) for term, idf, head in term_rows(index, counts, columns)]
     norm = sqrt(sum(weight * weight for _, weight, _ in features))
-    scores, heads, full = {}, {}, {}
+    scores, full = {}, {}
     for term, weight, head in features:
         weight /= norm
-        if head is not None:
+        # A single feature has an exact top-k head; combined features need every posting.
+        if head is not None and len(features) == 1:
             hits = [(doc, component) for component, doc in POSTING.iter_unpack(head) if active[doc]]
             if len(hits) >= 2 * limit:
-                heads[term] = (weight, hits)
                 for doc, component in hits:
                     scores[doc] = scores.get(doc, 0.0) + weight * component
                 continue
@@ -268,10 +264,6 @@ def query_scores(index, text, active, limit, use_heads=True):
         for component, doc in POSTING.iter_unpack(postings):
             if active[doc]:
                 scores[doc] = scores.get(doc, 0.0) + weight * component
-    if heads and len(features) > 1:
-        # shortcut: frequent grams seed a bounded shortlist, raise the limit if recall drops.
-        scores = dict(nlargest(2 * limit, scores.items(), key=itemgetter(1)))
-        rerank(index, scores, heads)
     return nlargest(limit, scores.items(), key=itemgetter(1))
 
 

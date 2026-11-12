@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import threading
+import time
 import unicodedata
 from contextlib import suppress
 from hashlib import sha256
@@ -352,13 +353,18 @@ def parse_model_json(content):
     return decoded
 
 
-def request_model(connection, system, content, temperature, schema):
+def request_model(connection, system, content, temperature, schema, *, session=None, deadline=None):
+    started = time.monotonic()
     provider, profile, key = connection
     ollama = provider == "ollama"
     plan_stage = "directions" in schema.get("properties", {})
     if profile.temperature is not None:
         temperature = profile.temperature
     timeout = profile.timeout if profile.timeout is not None else DEFAULT_TIMEOUT
+    if deadline is not None:
+        timeout = min(timeout, deadline - time.monotonic())
+        if timeout <= 0:
+            raise ModelError("本轮请求等待超时。")
     body = {
         "model": profile.model,
         "messages": [{"role": "system", "content": system},
@@ -381,9 +387,11 @@ def request_model(connection, system, content, temperature, schema):
         if profile.json_mode is not False:
             body["response_format"] = {"type": "json_object"}
     try:
-        response = requests.post(profile.url, json=body,
+        response = (session or requests).post(profile.url, json=body,
                                  headers={"Authorization": f"Bearer {key}"} if key else {},
-                                 timeout=(5, timeout), allow_redirects=False)
+                                 timeout=(min(5, timeout), timeout), allow_redirects=False)
+        if deadline is not None and time.monotonic() > deadline:
+            raise ModelError("本轮请求等待超时。")
         if not 200 <= response.status_code < 300:
             status = response.status_code
             message = {
@@ -420,6 +428,12 @@ def request_model(connection, system, content, temperature, schema):
         if message.get("reasoning") or message.get("reasoning_content"):
             raise ModelError("模型只返回了思考内容，没有最终回答。")
         raise ModelError("模型没有返回内容。")
+    usage = data.get("usage") or {}
+    logger.info("model stage=%s seconds=%.4f input_chars=%d usage=%s",
+                "plan" if plan_stage else "select", time.monotonic() - started,
+                len(system) + len(content), {key: usage[key] for key in
+                ("prompt_tokens", "completion_tokens", "prompt_cache_hit_tokens")
+                if isinstance(usage, dict) and type(usage.get(key)) is int})
     try:
         return parse_model_json(content_value)
     except ModelError:

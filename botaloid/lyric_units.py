@@ -56,6 +56,7 @@ class Track:
                 previous = result[-1]
                 last = previous.lines[-1]
                 if (last.position + 1 == line.position and last.stanza == line.stanza
+                        and len(previous.text) + len(pieces[0]) < 180
                         and (OPEN_END.search(previous.text) or
                              (WORD_CONTINUES.match(pieces[0]) and not SENTENCE_END.search(previous.text)))):
                     # A soft database line break can fall inside a Japanese phrase.
@@ -157,4 +158,13 @@ def split_line(text):
             result.append(rest)
         elif rest and result:
             result[-1] += rest
-    return [piece for piece in result if normalized(piece)]
+    bounded = []
+    for piece in result:
+        while len(piece) > 180:
+            gaps = [match.end() for match in re.finditer(r"[、，,;；:：\s]", piece[:141])]
+            cut = gaps[-1] if gaps and gaps[-1] >= 40 else 140
+            bounded.append(piece[:cut].strip())
+            piece = piece[cut:].strip()
+        if normalized(piece):
+            bounded.append(piece)
+    return bounded
