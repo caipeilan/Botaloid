@@ -45,6 +45,8 @@
           <input id="api-key" type="password" maxlength="2048" autocomplete="new-password" spellcheck="false">
           <label id="clear-key-label" class="checkbox" hidden><input id="clear-key" type="checkbox">移除已保存的密钥</label>
         </div>
+        <label for="history-limit">历史消息条数</label>
+        <input id="history-limit" type="number" min="0" max="100" step="1" value="6" required>
         <fieldset id="language-fields">
           <legend>曲库语言</legend>
           <label for="original-languages">原文语言</label>
@@ -58,7 +60,7 @@
             <label for="temperature">温度<input id="temperature" type="number" min="0" max="2" step="0.05" placeholder="规划 0.2 / 选句 0.55"></label>
             <label for="max-tokens">最大输出 token<input id="max-tokens" type="number" min="1" max="8192" step="1" placeholder="留空使用默认"></label>
             <label for="timeout">读取超时（秒）<input id="timeout" type="number" min="5" max="600" step="1" placeholder="75"></label>
-            <label id="num-ctx-field" for="num-ctx">上下文长度<input id="num-ctx" type="number" min="512" max="131072" step="512" placeholder="8192"></label>
+            <label id="num-ctx-field" for="num-ctx">上下文窗口（token）<input id="num-ctx" type="number" min="512" max="131072" step="512" placeholder="8192"></label>
           </div>
           <label id="think-field" class="checkbox"><input id="think" type="checkbox">允许模型先思考再作答</label>
           <label id="reasoning-effort-field" for="reasoning-effort" hidden>推理强度

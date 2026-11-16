@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
+from botaloid import chat
 import model_settings as settings
 
 
@@ -29,6 +30,29 @@ class ModelSettingsTests(unittest.TestCase):
             self.addCleanup(mock.stop)
         self.keys = keys
         self.url = "https://example.com/v1/chat/completions"
+
+    def test_history_limit_defaults_to_six_without_a_saved_value(self):
+        loaded = settings.load_settings()
+        self.assertEqual(loaded.history_limit, 6)
+        self.path.write_text(loaded.model_dump_json(exclude={"history_limit"}), encoding="utf-8")
+        self.assertEqual(settings.load_settings().history_limit, 6)
+        self.assertEqual(settings.public_settings(settings.load_settings())["history_limit"], 6)
+
+    def test_history_limit_is_saved_and_shared_between_providers(self):
+        for limit in (12, 100, 0):
+            with self.subTest(limit=limit):
+                result = settings.save_settings(settings.Draft(
+                    provider="api", url=self.url, model="model", history_limit=limit))
+                self.assertEqual(result["history_limit"], limit)
+                self.assertEqual(settings.active_runtime()[0].history_limit, limit)
+                result = settings.save_settings(settings.Draft(
+                    provider="ollama", url=settings.DEFAULT_OLLAMA_URL, model="local"))
+                self.assertEqual(result["history_limit"], limit)
+
+    def test_history_limit_rejects_invalid_values(self):
+        for value in (-1, 101, 1.5, True, None):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                settings.Draft(provider="api", url=self.url, model="model", history_limit=value)
 
     def test_switching_preserves_profiles_and_keeps_key_private(self):
         api = settings.Draft(provider="api", url=self.url, model="new-model", api_key="test-key")
@@ -371,6 +395,25 @@ class ModelSettingsTests(unittest.TestCase):
         self.assertEqual((loaded.original_languages, loaded.translation_languages),
                          (["日语"], ["中文"]))
         self.assertEqual(settings.active_runtime()[1:], (["日语"], ["中文"]))
+
+    def test_ollama_default_budget_for_planning_and_multi_passage_selection(self):
+        connection = settings.draft_connection(settings.Draft(
+            provider="ollama", url="http://127.0.0.1:11434", model="local"))
+        choices = {"choices": [{"id": number, "count": 1} for number in range(1, 17)]}
+        for schema, budget, data in ((chat.PLAN_SCHEMA, 512, {"directions": []}),
+                                     (chat.SELECT_SCHEMA, 1024, choices)):
+            with self.subTest(budget=budget):
+                captured = {}
+                response = types.SimpleNamespace(status_code=200, json=lambda: {
+                    "message": {"content": json.dumps(data)}})
+                with patch.object(settings.requests, "post", side_effect=lambda url, **kwargs:
+                                  captured.update(kwargs) or response):
+                    result = settings.request_model(connection, "sys", "user", 0.2, schema)
+                self.assertEqual(captured["json"]["options"]["num_predict"], budget)
+                self.assertEqual(result, data)
+                if schema is chat.SELECT_SCHEMA:
+                    self.assertEqual(len(chat.Selection.model_validate(result).choices), 16)
+                    self.assertNotIn("maxItems", captured["json"]["format"]["properties"]["choices"])
 
     def test_ollama_body_carries_context_and_think(self):
         class Response:

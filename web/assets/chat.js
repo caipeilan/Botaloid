@@ -174,7 +174,7 @@ composer.addEventListener("submit", async event => {
   const text = message.value.trim();
   if (!text || pending.has(current.id)) return;
   const thread = current;
-  const history = thread.turns.slice(-10).map(turn => {
+  const history = thread.turns.slice(-100).map(turn => {
     if (turn.role === "user") return {role: "user", text: turn.text};
     const fragments = turn.fragments || [];
     const songs = turn.songs || [];
@@ -183,7 +183,7 @@ composer.addEventListener("submit", async event => {
     return {
       role: "assistant", text: Array.from(lines.join("\n")).slice(0, 1000).join(""),
       source: items.at(-1)?.source,
-      song_ids: items.map(item => item.id ?? item.song_id ?? item.source?.song_id).filter(Boolean),
+      song_ids: [...new Set(items.map(item => item.id ?? item.song_id ?? item.source?.song_id).filter(Boolean))],
       intent: turn.intent, conditions: turn.conditions, fallback: turn.fallback, requested_intent: turn.requested_intent,
     };
   });
@@ -223,7 +223,7 @@ composer.addEventListener("submit", async event => {
     if (pending.get(thread.id) === request) {
       pending.delete(thread.id);
       thread.awaiting = false;
-      thread.turns = thread.turns.slice(-60);
+      thread.turns = thread.turns.slice(-100);
       save();
       if (current === thread) render();
     }

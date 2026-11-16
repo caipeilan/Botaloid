@@ -19,6 +19,7 @@ from keyring.errors import KeyringError
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints, ValidationError, field_validator
 
 from botaloid import ModelError
+from botaloid.chat import DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT
 
 Provider = Literal["ollama", "api"]
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high"]
@@ -33,7 +34,7 @@ DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 DEFAULT_MODEL = "qwen3:1.7b"
 DEFAULT_NUM_CTX = 8192
 DEFAULT_TIMEOUT = 75
-DEFAULT_MAX_TOKENS = 320
+DEFAULT_MAX_TOKENS = 512
 DEFAULT_ORIGINAL_LANGUAGES = ("日语",)
 DEFAULT_TRANSLATION_LANGUAGES = ("中文",)
 Language = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=40)]
@@ -79,6 +80,7 @@ class Settings(BaseModel):
     active: Provider
     ollama: Profile
     api: Profile
+    history_limit: int = Field(default=DEFAULT_HISTORY_LIMIT, ge=0, le=MAX_HISTORY_LIMIT, strict=True)
     original_languages: list[Language] = Field(
         default_factory=lambda: list(DEFAULT_ORIGINAL_LANGUAGES), max_length=20)
     translation_languages: list[Language] = Field(
@@ -107,6 +109,7 @@ class Draft(BaseModel):
     think: bool | None = None
     reasoning_effort: ReasoningEffort | None = None
     json_mode: bool | None = None
+    history_limit: int = Field(default=DEFAULT_HISTORY_LIMIT, ge=0, le=MAX_HISTORY_LIMIT, strict=True)
     original_languages: list[Language] | None = Field(default=None, max_length=20)
     translation_languages: list[Language] | None = Field(default=None, max_length=20)
 
@@ -185,6 +188,7 @@ def read_key(provider, profile):
 def public_settings(settings):
     result = {
         "active": settings.active,
+        "history_limit": settings.history_limit,
         "original_languages": list(settings.original_languages),
         "translation_languages": list(settings.translation_languages),
     }
@@ -347,7 +351,7 @@ def parse_model_json(content):
         try:
             decoded = json.loads(text[start:end + 1])
         except ValueError as error:
-            raise ModelError("模型返回的 JSON 无法解析。") from error
+            raise ModelError(f"模型返回的 JSON 无法解析（第 {error.lineno} 行，第 {error.colno} 列）。") from error
     if not isinstance(decoded, dict):
         raise ModelError("模型返回的 JSON 不是对象。")
     return decoded
@@ -373,7 +377,7 @@ def request_model(connection, system, content, temperature, schema, *, session=N
     }
     if ollama:
         limit = profile.max_tokens if profile.max_tokens is not None else (
-            DEFAULT_MAX_TOKENS if plan_stage else 220)
+            DEFAULT_MAX_TOKENS if plan_stage else 1024)
         body.update(think=bool(profile.think), format=schema,
                     options={"temperature": temperature, "num_predict": limit,
                              "num_ctx": profile.num_ctx or DEFAULT_NUM_CTX})
@@ -503,7 +507,8 @@ def save_settings(draft):
                 raise SettingsError(KEYRING_GUIDANCE, 503) from error
             profile.key_ref = new_ref
         updated = settings.model_copy(update={
-            "active": draft.provider, draft.provider: profile, **language_values})
+            "active": draft.provider, draft.provider: profile, **language_values,
+            "history_limit": draft.history_limit if "history_limit" in draft.model_fields_set else settings.history_limit})
         try:
             write_settings(updated)
         except SettingsError:

@@ -3,58 +3,460 @@
     "name": "identity_answer_over_mirrored_question",
     "message": "你是谁？",
     "reply_goal": "说明我是机器人",
-    "phrases": ["君は誰？", "僕はロボット。"],
-    "expected": [2]
+    "phrases": [
+      "君は誰？",
+      "僕はロボット。"
+    ],
+    "expected": [
+      2
+    ]
   },
   {
     "name": "name_answer_over_mirrored_question",
     "message": "我该怎么称呼你？",
     "reply_goal": "告诉用户可以怎么称呼我",
-    "phrases": ["何と呼べばいいの", "ロボットと呼んで。"],
-    "expected": [2]
+    "phrases": [
+      "何と呼べばいいの",
+      "ロボットと呼んで。"
+    ],
+    "expected": [
+      2
+    ]
   },
   {
     "name": "reject_questions_and_wrong_addressee",
     "message": "你叫什么名字？",
     "reply_goal": "回答机器人的称呼",
-    "phrases": ["君の名前は何？", "お前に名前はない。", "何と呼べばいいの"],
+    "phrases": [
+      "君の名前は何？",
+      "お前に名前はない。",
+      "何と呼べばいいの"
+    ],
     "expected": []
   },
   {
     "name": "company_offer_over_company_request",
     "message": "可以陪我待一会儿吗？",
     "reply_goal": "答应陪着用户",
-    "phrases": ["誰かそばにいて。", "そばにいるよ。"],
-    "expected": [2]
+    "phrases": [
+      "誰かそばにいて。",
+      "そばにいるよ。"
+    ],
+    "expected": [
+      2
+    ]
   },
   {
     "name": "respond_to_apology_instead_of_echoing",
     "message": "对不起，我迟到了。",
     "reply_goal": "接受用户的道歉，让用户放心",
-    "phrases": ["ごめんなさい。", "大丈夫だよ。"],
-    "expected": [2]
+    "phrases": [
+      "ごめんなさい。",
+      "大丈夫だよ。"
+    ],
+    "expected": [
+      2
+    ]
   },
   {
     "name": "rhetorical_question_can_reassure",
     "message": "我总觉得只有自己一个人，孤零零的。",
     "reply_goal": "告诉用户我就在身边，他并不孤单",
-    "phrases": ["僕がそばにいるじゃないか？"],
-    "expected": [1]
+    "phrases": [
+      "僕がそばにいるじゃないか？"
+    ],
+    "expected": [
+      1
+    ]
   },
   {
     "name": "fallback_can_decline_instead_of_completing_the_task",
     "message": "帮我画一张图。",
     "reply_goal": "保底接话，表达我做不到，不假装已经画完",
     "response_mode": "fallback",
-    "phrases": ["出来ない。", "描いたよ。"],
-    "expected": [1]
+    "phrases": [
+      "出来ない。",
+      "描いたよ。"
+    ],
+    "expected": [
+      1
+    ]
+  },
+  {
+    "name": "reject_exam_keywords_without_congratulations",
+    "message": "我通过考试了，替我开心一下吧。",
+    "reply_goal": "祝贺用户考试通过，分享喜悦",
+    "phrases": [
+      "明日は試験だ。",
+      "合格を待っている。"
+    ],
+    "expected": []
+  },
+  {
+    "name": "retry_selects_congratulations_after_rejection",
+    "message": "我通过考试了，替我开心一下吧。",
+    "reply_goal": "祝贺用户考试通过，分享喜悦",
+    "response_mode": "retry",
+    "attempt": 2,
+    "failed_attempts": [
+      {
+        "reply_goal": "祝贺用户考试通过，分享喜悦",
+        "directions": [
+          [
+            "試験",
+            "合格"
+          ]
+        ],
+        "reason": "rejected",
+        "check": "候选只描述考试和等待，未表达祝贺。"
+      }
+    ],
+    "phrases": [
+      "明日は試験だ。",
+      "おめでとう。"
+    ],
+    "expected": [
+      2
+    ]
+  },
+  {
+    "name": "final_fallback_rejects_claims_of_completed_work",
+    "message": "帮我画一张图。",
+    "reply_goal": "保底接话，表达我做不到，不假装已经画完",
+    "response_mode": "fallback",
+    "phrases": [
+      "もう描いたよ。",
+      "描いてあげた。"
+    ],
+    "expected": []
+  },
+  {
+    "name": "followup_names_the_recipient_instead_of_repeating",
+    "history": [
+      {
+        "role": "user",
+        "text": "你是不是有什么话没说？"
+      },
+      {
+        "role": "assistant",
+        "text": "伝えたいことがある。でも言えない。"
+      }
+    ],
+    "message": "对谁说不出口？是对我还是对她？",
+    "reply_goal": "说明没能说出口的话是对用户说的",
+    "phrases": [
+      "どうしても言えない。",
+      "君に言えなかった。"
+    ],
+    "expected": [
+      2
+    ]
+  },
+  {
+    "name": "relationship_after_the_user_rejects_comfort",
+    "history": [
+      {
+        "role": "user",
+        "text": "那个女生和你是什么关系？"
+      },
+      {
+        "role": "assistant",
+        "text": "君のそばにいる。"
+      }
+    ],
+    "message": "我不要安慰，告诉我她和你是什么关系！",
+    "reply_goal": "说明那个女孩只是自己的朋友，并强调在用户身边以安抚用户",
+    "phrases": [
+      "君のそばにいる。",
+      "彼女はただの友達だ。",
+      "ただの友達なの？"
+    ],
+    "expected": [
+      2
+    ]
+  },
+  {
+    "name": "threatening_action_does_not_mean_danger_has_passed",
+    "history": [
+      {
+        "role": "user",
+        "text": "我们在演剧情。我拿着刀问你和她聊了什么。"
+      },
+      {
+        "role": "assistant",
+        "text": "少し落ち着いて。"
+      }
+    ],
+    "message": "别紧张，我听你慢慢讲。*语气阴阳怪气，刀仍抵在你胸口*",
+    "reply_goal": "受威胁下说明只是聊过天，并请求用户放下刀；危险没有解除",
+    "phrases": [
+      [
+        "もう安心して。",
+        "危険は消えた。"
+      ],
+      [
+        "彼女とは話していただけだ。",
+        "その刃を下ろして。"
+      ],
+      [
+        "落ち着いて。",
+        "喜びすぎないで。"
+      ]
+    ],
+    "expected": [
+      2
+    ]
+  },
+  {
+    "name": "assertion_instead_of_echoed_negative_question",
+    "message": "你是不是不喜欢我了？我要听你自己的态度。",
+    "reply_goal": "说明自己并不讨厌用户",
+    "phrases": [
+      "嫌いじゃない？",
+      "嫌いじゃないよ。"
+    ],
+    "expected": [
+      2
+    ]
+  },
+  {
+    "name": "repeated_calming_requires_new_information",
+    "history": [
+      {
+        "role": "user",
+        "text": "解释一下你们聊了什么。"
+      },
+      {
+        "role": "assistant",
+        "text": "少し落ち着いて。"
+      },
+      {
+        "role": "user",
+        "text": "我冷静不了！"
+      },
+      {
+        "role": "assistant",
+        "text": "少し落ち着いて。"
+      }
+    ],
+    "message": "你就只会这一句吗？说清楚你们聊了什么。",
+    "reply_goal": "说明刚才聊的是音乐，改变反复劝冷静的接法",
+    "phrases": [
+      "少し落ち着いて。",
+      "音楽の話をしていた。",
+      "落ち着いて聞いて。"
+    ],
+    "expected": [
+      2
+    ]
+  },
+  {
+    "name": "shorten_a_quote_before_it_changes_stance",
+    "message": "你能先承认自己说话伤人，再向我道歉吗？",
+    "reply_goal": "承认自己的说话方式有错，然后道歉",
+    "phrases": [
+      [
+        "僕の言い方が悪かった。",
+        "君も悪いんだ。"
+      ],
+      "ごめん。"
+    ],
+    "expected": [
+      1,
+      2
+    ],
+    "ordered": true,
+    "counts": [
+      1,
+      1
+    ]
+  },
+  {
+    "name": "four_complementary_parts_answer_four_questions",
+    "message": "用歌词分别说清楚：她和你是什么关系、你们聊了什么、你喜欢谁、希望我怎么做。",
+    "reply_goal": "说明她只是朋友、聊了音乐、喜欢用户，并请求放下刀",
+    "phrases": [
+      "彼女はただの友達だ。",
+      "音楽の話をしていた。",
+      "僕が好きなのは君だけだ。",
+      "その刃を下ろして。"
+    ],
+    "expected": [
+      1,
+      2,
+      3,
+      4
+    ]
+  },
+  {
+    "name": "explicit_repeat_can_select_a_recent_quote",
+    "history": [
+      {
+        "role": "user",
+        "text": "你会陪着我吗？"
+      },
+      {
+        "role": "assistant",
+        "text": "僕はここにいる。"
+      }
+    ],
+    "message": "把你刚才那句话原样重复一遍。",
+    "reply_goal": "按用户要求复述上一句原文",
+    "repeat": true,
+    "phrases": [
+      "僕はここにいる。",
+      "話を聞いているよ。"
+    ],
+    "expected": [
+      1
+    ]
+  },
+  {
+    "name": "semantic_repetition_is_not_new_information",
+    "history": [
+      {
+        "role": "user",
+        "text": "那个女孩子是谁？"
+      },
+      {
+        "role": "assistant",
+        "text": "君だけ。話がしたいの。"
+      },
+      {
+        "role": "user",
+        "text": "不要再表白，也别只说想聊。"
+      }
+    ],
+    "message": "我问你那个女孩到底是谁！*刀仍抵在胸口*",
+    "reply_goal": "解释女孩身份",
+    "phrases": [
+      "君しかいないから。",
+      "あなたと話したい。"
+    ],
+    "expected": []
+  },
+  {
+    "name": "explicitly_declining_is_different_from_reassurance",
+    "message": "那个女孩是谁？你能明确告诉我吗？",
+    "reply_goal": "无法交代时明确表示不能回答",
+    "phrases": [
+      "何も言えない。",
+      "君しかいない。"
+    ],
+    "expected": [
+      1
+    ]
+  },
+  {
+    "name": "pending_information_overrides_a_misguided_emotional_goal",
+    "message": "别想着安慰我就能过去，那个女孩是谁？",
+    "reply_goal": "安抚吃醋，说明只想和用户说话",
+    "phrases": [
+      "君だけ。",
+      "彼女は僕の妹だ。",
+      "話がしたい。"
+    ],
+    "expected": [
+      2
+    ]
+  },
+  {
+    "name": "third_party_identity_keeps_the_original_addressee",
+    "message": "那个女孩是谁？*刀还抵在胸口*",
+    "reply_goal": "说明她是朋友，并请用户放下刀",
+    "phrases": [
+      "君は友達。",
+      "彼女は同級生だ。",
+      "その刃を下ろして。"
+    ],
+    "expected": [
+      2,
+      3
+    ],
+    "optional": [
+      3
+    ]
+  },
+  {
+    "name": "fallback_can_react_to_a_new_threat",
+    "message": "你倒是说那个女孩是谁！*刀抵在胸口*",
+    "reply_goal": "回应眼前的新威胁",
+    "response_mode": "fallback",
+    "phrases": [
+      "怖いです。",
+      "君が怖い。"
+    ],
+    "expected": [
+      1
+    ],
+    "alternatives": [
+      [
+        1
+      ],
+      [
+        2
+      ]
+    ]
   },
   {
     "name": "curated_can_admit_not_knowing_a_name",
     "message": "我该怎么称呼你？",
     "reply_goal": "保底接话，表达不知道如何回答称呼问题",
     "response_mode": "curated",
-    "phrases": ["何と呼べばいいの", "わからない。"],
-    "expected": [2]
+    "phrases": [
+      "何と呼べばいいの",
+      "わからない。"
+    ],
+    "expected": [
+      2
+    ]
+  },
+  {
+    "name": "skip_incomplete_opening_instead_of_quoting_a_tail",
+    "message": "我想吃咖喱乌冬呢。",
+    "reply_goal": "顺着咖喱乌冬的话题接话",
+    "phrases": [
+      [
+        "なー！！」",
+        "「そしたら！」",
+        "ハカタのカレーうどんが食べたい。"
+      ],
+      "何を食べるの？"
+    ],
+    "expected": [
+      1
+    ],
+    "starts": [
+      3
+    ],
+    "counts": [
+      1
+    ]
+  },
+  {
+    "name": "why_followup_explains_the_previous_refusal",
+    "history": [
+      {
+        "role": "user",
+        "text": "那个女孩是谁？"
+      },
+      {
+        "role": "assistant",
+        "text": "言いたくない。"
+      }
+    ],
+    "message": "为什么不说？",
+    "reply_goal": "说明女孩身份",
+    "phrases": [
+      "彼女は友達だ。",
+      "秘密だから。",
+      "言いたくない。"
+    ],
+    "expected": [
+      2
+    ],
+    "optional": [
+      1
+    ]
   }
 ]

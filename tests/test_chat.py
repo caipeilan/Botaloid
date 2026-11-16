@@ -5,6 +5,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
+from pydantic import ValidationError
+
 import app
 from botaloid import LyricBot, chat
 
@@ -19,6 +21,28 @@ class ChatTests(unittest.TestCase):
         for title, text in [("海", "雨がやんだ"), ("空", "明日また会おう"), ("舟", "静かな夜")]:
             app.write_song(self.db, app.SongInput(title=title, author="作者", lyrics=[text]))
         self.db.commit()
+
+    def test_planner_accepts_common_array_and_boolean_shapes_without_losing_terms(self):
+        plan = chat.Plan.model_validate({
+            "intent": "chat", "tone": "neutral", "repeat": "false",
+            "directions": [str(i) for i in range(14)],
+        })
+        self.assertFalse(plan.repeat)
+        self.assertEqual(plan.directions, [[str(i) for i in range(start, start + 3)] for start in (0, 3, 6, 9)])
+        self.assertEqual(chat.Plan(intent="chat", tone="neutral").directions, [])
+        self.assertTrue(chat.Plan(intent="chat", tone="neutral", repeat="true").repeat)
+        grouped = chat.Plan(intent="chat", tone="neutral", directions=[["a", "b", "c", "d"]] * 5)
+        self.assertEqual(grouped.directions, [["a", "b", "c"]] * 4)
+        with self.assertRaises(ValidationError):
+            chat.Plan(intent="chat", tone="neutral", directions=[["a", 1]])
+
+    def test_long_internal_notes_are_trimmed_without_discarding_the_selection(self):
+        note = "内部说明" * 100
+        selected = chat.model_json(chat.SELECT, {"message": "月", "history": [], "previous_tone": "neutral"},
+                                   0.55, lambda *_: {"check": note, "choices": [{"id": 1}]})
+        self.assertEqual(selected["check"], note[:160])
+        self.assertEqual(selected["choices"][0]["id"], 1)
+
 
     def test_cross_song_reply_uses_database_and_ignores_forged_id(self):
         def model(system, prompt, _temperature, _connection):
@@ -54,6 +78,83 @@ class ChatTests(unittest.TestCase):
             options = chat.candidates_for(self.db, index, chat.enabled_songs(self.db), groups, [])
         self.assertEqual(len(options), 16)
         self.assertIn("明日また会おう", {option[0].text for option in options[:2]})
+
+    def test_primary_response_direction_reaches_candidates_before_crowded_emotional_directions(self):
+        for number in range(20):
+            app.write_song(self.db, app.SongInput(title=f"安慰{number}", author="自写测试", lyrics=[f"安心して。{number}"]))
+        app.write_song(self.db, app.SongInput(title="关系", author="自写测试", lyrics=["彼女は友達だ。\n"] ))
+        self.db.commit()
+        groups = chat.query_groups({"directions": [["友達"], ["安心して"]]}, "")
+        self.assertEqual(groups[0], ["友達"])
+        quotes = self.bot._retrieve(self.db, chat.enabled_songs(self.db), groups, [],
+                                   lambda song_id: chat.load_track(self.db, song_id))
+        self.assertEqual(len(quotes), 16)
+        self.assertEqual(quotes[0].phrases[0].text, "彼女は友達だ。")
+
+    def test_recent_assembled_phrases_yield_to_fresh_replies_and_keep_question_marks(self):
+        tracks = {
+            7: chat.Track([chat.Line(71, 7, 1, 0, "ねえ。君への言葉は"),
+                           chat.Line(72, 7, 2, 0, "まだ言えない。")]),
+            8: chat.Track([chat.Line(81, 8, 1, 0, "嫌いじゃない？"),
+                           chat.Line(82, 8, 2, 0, "嫌いじゃない。")]),
+            9: chat.Track([chat.Line(91, 9, 1, 0, "今は話せる。")]),
+        }
+        repeated = tracks[7].phrases[1]
+        self.assertEqual(repeated.text, "君への言葉はまだ言えない。")
+        self.assertEqual(len(repeated.lines), 2)
+        hits = [(tracks[7].lines[0],), (tracks[8].lines[0],),
+                (tracks[8].lines[1],), (tracks[9].lines[0],)]
+        recent = [repeated.text, "嫌いじゃない？"]
+        with patch.object(self.bot, "_query_index", return_value=hits):
+            quotes = self.bot._retrieve(self.db, set(tracks), [["言葉", "嫌いじゃない"]],
+                                        recent, tracks.__getitem__)
+        self.assertEqual([(quote.song_id, quote.start) for quote in quotes], [(8, 1), (9, 0)])
+        old_only = chat.quote_options(hits[:1], [["言葉"]], tracks.__getitem__, recent=recent)
+        self.assertEqual([quote.phrases[0].text for quote in old_only], [repeated.text])
+
+    def test_selection_receives_recent_phrase_numbers_and_whole_passage_translations(self):
+        app.write_song(self.db, app.SongInput(title="説明", author="自写测试", lyrics=[
+            {"text": "ねえ。君への言葉は", "translation": "听我说，想对你说的话"},
+            {"text": "まだ言えない。", "translation": "还没有说出口"},
+            {"text": "君には話したい。", "translation": "但我想告诉你"},
+        ]))
+        self.db.commit()
+
+        def model(system, prompt, *_):
+            if system == chat.PLAN:
+                self.assertIn("君には話したい。", prompt)
+                self.assertIn("你还没对我说出口，对吗？", prompt)
+                return {"intent": "chat", "tone": "neutral", "reply_goal": "承认这些话还没能对用户说出口",
+                        "directions": [["言葉"], ["話したい"]]}
+            self.assertIn("检索参考（可修正，以当前用户原话为准）：承认这些话还没能对用户说出口", prompt)
+            self.assertIn("近期已引用的句子编号：2", prompt)
+            self.assertIn("听我说，想对你说的话 / 还没有说出口 / 但我想告诉你", prompt)
+            chosen = re.search(r"候选 (\d+)（《説明》[^\n]+：\n1\) 君への言葉はまだ言えない。", prompt)
+            self.assertIsNotNone(chosen)
+            return {"choices": [{"id": int(chosen[1]), "count": 1}]}
+
+        history = [{"role": "user", "text": "你有什么想说的？"},
+                   {"role": "assistant", "text": "君には話したい。"}]
+        result = self.bot.reply("你还没对我说出口，对吗？", history, model=model)
+        self.assertEqual([fragment["text"] for fragment in result["fragments"]], ["君への言葉はまだ言えない。"])
+
+    def test_explicit_repeat_keeps_used_lyrics_when_fresh_candidates_exist(self):
+        for title, text in (("原句", "僕はここにいる。"), ("新句", "君もここにいる？")):
+            app.write_song(self.db, app.SongInput(title=title, author="自写测试", lyrics=[text]))
+        self.db.commit()
+
+        def model(system, prompt, *_):
+            if system == chat.PLAN:
+                return {"intent": "chat", "tone": "neutral", "repeat": True, "directions": [["ここにいる"]]}
+            self.assertIn("本轮明确要求复述原句", prompt)
+            self.assertIn("近期已引用的句子编号：1", prompt)
+            self.assertIn("君もここにいる？", prompt)
+            chosen = re.search(r"候选 (\d+)（《原句》", prompt)
+            self.assertIsNotNone(chosen)
+            return {"choices": [{"id": int(chosen[1]), "count": 1}]}
+
+        result = self.bot.reply("把你上一句原样再说一遍。", [{"role": "assistant", "text": "僕はここにいる。"}], model=model)
+        self.assertEqual([fragment["text"] for fragment in result["fragments"]], ["僕はここにいる。"])
 
     def test_project_intro_searches_for_identity_before_fallback(self):
         self.db.execute("UPDATE lyric_lines SET fallback_kind='default' WHERE song_id=3")
@@ -179,6 +280,111 @@ class ChatTests(unittest.TestCase):
         result = self.bot.reply("第二首是什么歌？", history)
         self.assertEqual((result["intent"], [song["id"] for song in result["songs"]]),
                          ("find_song", [second]))
+
+    def test_chat_can_select_four_or_all_candidates_and_reference_the_fourth_song(self):
+        for number in range(16):
+            app.write_song(self.db, app.SongInput(
+                title=f"光景{number}", author="作者", lyrics=[f"光る風景{number}。"]))
+        self.db.commit()
+        for count in (4, 16):
+            with self.subTest(count=count):
+                expected = []
+
+                def model(system, prompt, _temperature, _schema):
+                    if system == chat.PLAN:
+                        return {"intent": "chat", "tone": "neutral", "directions": [["光る"]]}
+                    candidates = re.findall(r"候选 (\d+)（《([^》]+)》", prompt)
+                    self.assertEqual(len(candidates), 16)
+                    chosen = list(reversed(candidates))[:count]
+                    expected.extend(title for _number, title in chosen)
+                    return {"choices": [{"id": int(number), "count": 1} for number, _title in chosen]}
+
+                self.model.side_effect = model
+                reply = self.bot.reply("回一句")
+                fragments = reply["fragments"]
+                self.assertEqual([fragment["title"] for fragment in fragments], expected)
+                history = [{"role": "assistant", "intent": "chat",
+                            "text": "\n".join(fragment["text"] for fragment in fragments),
+                            "song_ids": [fragment["song_id"] for fragment in fragments],
+                            "source": fragments[-1]["source"]}]
+                self.model.side_effect = [
+                    {"intent": "find_song", "tone": "neutral", "reference": "4", "directions": []}]
+                followup = self.bot.reply("第四首是什么歌？", history)
+                self.assertEqual([song["id"] for song in followup["songs"]], [fragments[3]["song_id"]])
+
+    def test_different_passages_and_different_songs_with_the_same_title_keep_their_credits(self):
+        first, _ = app.write_song(self.db, app.SongInput(title="同名", author="甲", lyrics=[
+            {"text": "月が微笑む。", "stanza": 0}, {"text": "星が頷く。", "stanza": 1}]))
+        second, _ = app.write_song(self.db, app.SongInput(title="同名", author="乙", lyrics=["風が歌う。"]))
+        self.db.commit()
+        track = chat.load_track(self.db, first)
+        other = chat.load_track(self.db, second)
+        candidates = [chat.Quote(first, 0, (track.phrases[0],)),
+                      chat.Quote(first, 1, (track.phrases[1],)),
+                      chat.Quote(second, 0, (other.phrases[0],))]
+        self.model.side_effect = [
+            {"intent": "chat", "tone": "neutral", "directions": [["月"]]},
+            {"choices": [{"id": number, "count": 1} for number in (1, 1, 2, 3)]},
+        ]
+        with patch.object(self.bot, "_retrieve", return_value=candidates):
+            reply = self.bot.reply("回一句")
+        self.assertEqual([(fragment["text"], fragment["author"]) for fragment in reply["fragments"]],
+                         [("月が微笑む。", "甲"), ("星が頷く。", "甲"), ("風が歌う。", "乙")])
+        self.assertEqual(len(chat.answer_candidates(self.db, candidates + candidates)), 3)
+        self.model.side_effect = [{"intent": "find_song", "tone": "neutral", "reference": 2, "directions": []}]
+        followup = self.bot.reply("第二首是什么歌？", [{
+            "role": "assistant", "text": "月が微笑む。", "song_ids": [first, first, second], "intent": "chat"}])
+        self.assertEqual([song["id"] for song in followup["songs"]], [second])
+
+    def test_selection_skips_duplicate_and_overlapping_positions(self):
+        phrases = tuple(chat.Phrase(text, ()) for text in ("一句", "二句", "三句"))
+        candidates = [chat.Quote(7, 0, phrases), chat.Quote(7, 1, phrases[1:]),
+                      chat.Quote(7, 5, phrases[:1]), chat.Quote(8, 0, phrases[:1])]
+        choices = [{"id": 999}, {"id": 1, "count": 2}, {"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}]
+        selected = chat.select_choices(choices, candidates)
+        self.assertEqual([(quote.song_id, quote.start, len(quote.phrases)) for quote in selected],
+                         [(7, 0, 2), (7, 5, 1), (8, 0, 1)])
+
+    def test_selection_can_skip_a_fragment_and_keeps_the_actual_source_range(self):
+        song_id, _ = app.write_song(self.db, app.SongInput(title="连续片段", author="自写测试", lyrics=[
+            "なー！！」", "「そしたら！」", "ハカタのカレーうどんが食べたい。", "一緒に行こう。",
+        ]))
+        self.db.commit()
+        track = chat.load_track(self.db, song_id)
+        candidate = chat.Quote(song_id, 0, tuple(track.phrases))
+        selected = chat.select_choices([{"id": 1, "start": 3, "count": 2}], [candidate])
+        fragments = chat.answer_candidates(self.db, selected)
+        self.assertEqual(fragments[0]["text"], "ハカタのカレーうどんが食べたい。\n一緒に行こう。")
+        self.assertEqual(fragments[0]["source"], {"song_id": song_id, "start": 2, "end": 3})
+
+    def test_offset_selection_validates_bounds_and_deduplicates_actual_positions(self):
+        phrases = tuple(chat.Phrase(text, ()) for text in ("一句", "二句", "三句", "四句"))
+        candidates = [chat.Quote(7, 5, phrases), chat.Quote(7, 6, phrases[1:])]
+        selected = chat.select_choices([{"id": 1, "start": 5}, {"id": 1, "start": 0},
+                                        {"id": 1, "start": 2, "count": 2}, {"id": 2},
+                                        {"id": 1, "start": 4}], candidates)
+        self.assertEqual([(q.start, len(q.phrases)) for q in selected], [(6, 2), (8, 1)])
+        for value in (True, 0, 5):
+            with self.subTest(start=value), self.assertRaises(ValidationError):
+                chat.Choice(id=1, start=value)
+
+    def test_unused_model_labels_do_not_drop_different_passages(self):
+        candidates = [chat.Quote(i, 0, (chat.Phrase(text, ()),))
+                      for i, text in enumerate(("知らない。", "わからない。", "説明できない。"), 1)]
+        selected = chat.select_choices([
+            {"id": 1, "meaning": "不知道对方身份"}, {"id": 2, "meaning": "不知道对方身份"},
+            {"id": 3, "meaning": "不能说明原因"},
+        ], candidates)
+        self.assertEqual([quote.song_id for quote in selected], [1, 2, 3])
+
+    def test_reference_is_checked_against_the_actual_previous_songs(self):
+        history = [{"role": "assistant", "text": "雨がやんだ", "intent": "chat", "song_ids": [1, 2, 3]}]
+        self.model.side_effect = [
+            {"intent": "find_song", "tone": "neutral", "reference": 4, "directions": []},
+            {"intent": "chat", "tone": "neutral", "directions": [["鳳凰麒麟"]]},
+        ]
+        result = self.bot.reply("第四首是什么歌？", history)
+        self.assertEqual((result["status"], result["songs"], result["fragments"]), ("no_match", [], []))
 
     def test_count_beyond_candidate_length_is_clamped(self):
         quote = chat.Quote(7, 0, (chat.Phrase("一句", ()), chat.Phrase("二句", ())))
@@ -328,6 +534,43 @@ class ChatTests(unittest.TestCase):
                 self.assertEqual(self.bot.reply("玻璃行星")["fragments"], [])
             app.update_song(4, song("新しい惑星。"))
             self.assertEqual(self.bot.reply("玻璃行星")["fragments"][0]["text"], "新しい惑星。")
+
+    def test_history_limit_reaches_plan_and_select(self):
+        history = [{"role": "user" if i % 2 == 0 else "assistant", "text": f"{i}:" + "旧" * 400}
+                   for i in range(100)]
+        history[-1].update(intent="chat", song_ids=[1], conditions={"author": "作者"})
+        for limit in (None, 0, 1, 6, 12, 100):
+            with self.subTest(limit=limit):
+                contexts = []
+
+                def model(system, prompt, _temperature, _schema):
+                    contexts.append(prompt)
+                    if system == chat.PLAN:
+                        return {"directions": [["雨がやんだ"]], "tone": "neutral"}
+                    return {"choices": [1]}
+
+                options = {} if limit is None else {"history_limit": limit}
+                with patch.object(chat, "model_json", side_effect=model):
+                    self.bot.reply("回一句", history, **options)
+                selected = history[-(6 if limit is None else limit):] if limit != 0 else []
+                self.assertEqual(len(contexts), 2)
+                for context in contexts:
+                    self.assertEqual([turn["text"] for turn in context["history"]],
+                                     [turn["text"][:350] for turn in selected])
+                    if selected:
+                        self.assertEqual(context["history"][-1]["song_ids"], [1])
+                        self.assertEqual(context["history"][-1]["conditions"]["author"], "作者")
+                    else:
+                        self.assertIsNone(context["previous_intent"])
+                        self.assertEqual(context["previous_songs"], {})
+
+    def test_history_input_and_limit_are_bounded(self):
+        turn = {"role": "user", "text": "你好"}
+        with self.assertRaises(ValidationError):
+            chat.ChatInput(message="继续", history=[turn] * 101)
+        for limit in (-1, 101, 1.5, True, None):
+            with self.subTest(limit=limit), self.assertRaises(ValueError):
+                self.bot.reply("继续", history_limit=limit)
 
     def test_language_config_reaches_plan_and_select(self):
         contexts = []

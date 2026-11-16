@@ -14,6 +14,7 @@ const test = byId("test-model");
 const save = byId("save-model");
 const originalLanguages = byId("original-languages");
 const translationLanguages = byId("translation-languages");
+const historyLimit = byId("history-limit");
 const endpoint = "/api/model-settings";
 const params = {
   temperature: byId("temperature"),
@@ -82,6 +83,7 @@ function showProfile() {
 function showSettings(result) {
   settings = result;
   provider.value = result.active;
+  historyLimit.value = result.history_limit;
   originalLanguages.value = (result.original_languages || []).join(", ");
   translationLanguages.value = (result.translation_languages || []).join(", ");
   showProfile();
@@ -104,6 +106,7 @@ function draft() {
     json_mode: remote ? params.json_mode.checked : null,
     original_languages: languageList(originalLanguages),
     translation_languages: languageList(translationLanguages),
+    history_limit: Number(historyLimit.value),
   };
 }
 
@@ -129,7 +132,7 @@ model.addEventListener("input", () => notice(status));
 key.addEventListener("input", () => notice(status));
 clear.addEventListener("change", () => { keyState(); notice(status); });
 for (const input of Object.values(params)) input.addEventListener("input", () => notice(status));
-for (const input of [originalLanguages, translationLanguages]) input.addEventListener("input", () => notice(status));
+for (const input of [originalLanguages, translationLanguages, historyLimit]) input.addEventListener("input", () => notice(status));
 
 byId("load-models").addEventListener("click", () => {
   if (!url.reportValidity()) return;
@@ -165,7 +168,7 @@ form.addEventListener("submit", event => {
   const payload = draft();
   run("正在保存…", async () => {
     showSettings(await api(endpoint, "PUT", payload));
-    notice(status, "已保存，新对话请求会使用此模型。");
+    notice(status, "已保存，下一轮聊天使用新设置。");
   });
 });
 

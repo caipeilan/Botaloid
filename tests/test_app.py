@@ -78,6 +78,17 @@ class AdminAccessTests(unittest.TestCase):
         self.assertEqual(caught.exception.status_code, 403)
 
 
+class ChatSettingsTests(unittest.TestCase):
+    def test_chat_uses_the_saved_history_limit(self):
+        loaded = settings.environment_settings().model_copy(update={"history_limit": 12})
+        payload = app.ChatInput(message="继续", history=[{"role": "user", "text": "你好"}] * 100)
+        with patch.object(settings, "active_runtime", return_value=(loaded, [], [])), \
+             patch.object(app, "library", None), patch.object(app, "bot") as bot:
+            app.run_chat(payload)
+        self.assertEqual(bot.reply.call_args.args[1], payload.history)
+        self.assertEqual(bot.reply.call_args.kwargs["history_limit"], 12)
+
+
 class ModelListTests(unittest.TestCase):
     class Response:
         def __init__(self, status=200, data=None, json_error=False):

@@ -106,6 +106,7 @@ def run_chat(payload, progress=None):
                 payload.message, payload.history, payload.tone, model=model,
                 original_languages=original_languages,
                 translation_languages=translation_languages, progress=progress, deadline=deadline,
+                history_limit=loaded.history_limit,
             )
     except (ModelError, SearchIndexError) as error:
         raise HTTPException(503, str(error)) from error

@@ -115,6 +115,7 @@ class PublishedLibraryTests(unittest.TestCase):
         result = self.library.reply("夜晚", model=model)
         self.assertEqual((result["status"], result["fragments"]), ("no_match", []))
 
+
     def test_failed_update_keeps_old_version_and_does_not_restart_each_chat(self):
         self.write("星を見上げる。")
         with patch("botaloid.library.subprocess.Popen", side_effect=OSError("test build failure")) as process:
@@ -301,13 +302,28 @@ class ReplyFlowTests(unittest.TestCase):
 
     def test_malformed_model_fields_are_errors(self):
         for result in ({}, {"intent": "chat", "tone": "bogus", "directions": []},
-                       {"intent": "chat", "tone": "neutral", "directions": [["a", "b", "c", "d"]]}):
+                       {"intent": "chat", "tone": "neutral", "directions": [], "repeat": "maybe"},
+                       {"intent": "chat", "tone": "neutral", "directions": [["a", 4]]}):
             with self.subTest(result=result), self.assertRaises(ModelError):
                 self.bot.reply("你好", model=lambda *_: result)
         for result in ({}, {"choices": [{"id": True}]}, {"choices": [{"id": 1, "count": 5}]}):
             with self.subTest(result=result), self.assertRaises(ModelError):
                 chat.model_json(chat.SELECT, {"message": "月", "history": [], "previous_tone": "neutral"},
                                 0.55, lambda *_: result)
+
+    def test_model_validation_names_the_stage_and_field_without_logging_the_input(self):
+        private_reason = "未公开的模型说明" * 30
+        for system, value, stage, field in ((chat.PLAN, {"intent": "chat", "tone": "unknown", "directions": []}, "规划", "tone"),
+                                            (chat.SELECT, {"check": {"private": private_reason}, "choices": []}, "选句", "check"),
+                                            (chat.SELECT, {"choices": [{"id": True}]}, "选句", "choices.0.id")):
+            with self.subTest(stage=stage, field=field), self.assertLogs(chat.log, level="WARNING") as records:
+                with self.assertRaises(ModelError) as caught:
+                    chat.model_json(system, {"message": "消息", "history": [], "previous_tone": "neutral", "attempt": 2},
+                                    0.2, lambda *_: value)
+                self.assertIn(stage + "阶段", str(caught.exception))
+                self.assertIn(field, str(caught.exception))
+                self.assertIn("attempt=2", " ".join(records.output))
+                self.assertNotIn(private_reason, " ".join(records.output))
 
     def test_selection_receives_translation_conditions_and_real_stages(self):
         prompts, stages = [], []
@@ -329,7 +345,7 @@ class ReplyFlowTests(unittest.TestCase):
         self.assertNotIn("模型改写的回复", json.dumps(result, ensure_ascii=False))
         self.assertEqual(stages, ["retrieving", "planning", "retrieving", "selecting", "validating"])
 
-    def test_reply_goal_reaches_selection_but_only_original_lyrics_are_returned(self):
+    def test_chat_selection_reads_the_user_with_a_revisable_search_goal(self):
         with closing(self.bot.connect()) as db, db:
             app.write_song(db, app.SongInput(title="問", author="作者", lyrics=["君は誰？"] ))
             app.write_song(db, app.SongInput(title="声", author="作者", lyrics=["僕はロボット。"] ))
@@ -339,9 +355,11 @@ class ReplyFlowTests(unittest.TestCase):
             if system == chat.PLAN:
                 return {"intent": "chat", "tone": "neutral", "reply_goal": "说明我是机器人",
                         "directions": [["ロボット"], ["君は誰"]]}
-            self.assertIn("本轮回应目标：说明我是机器人", prompt)
+            self.assertNotIn("本轮回应目标", prompt)
+            self.assertIn("检索参考（可修正，以当前用户原话为准）：说明我是机器人", prompt)
+            self.assertIn("你是谁？", prompt)
             self.assertIn("君は誰？", prompt)
-            candidate = re.search(r"候选 (\d+)（《声》[^\n]+僕はロボット。", prompt)
+            candidate = re.search(r"候选 (\d+)（《声》[^\n]+：\n1\) 僕はロボット。", prompt)
             self.assertIsNotNone(candidate)
             return {"check": "我是机器人能回答身份，问你是谁不能回答", "choices": [{"id": int(candidate[1]), "count": 1}]}
         result = self.bot.reply("你是谁？", model=model)
@@ -358,14 +376,13 @@ class ReplyFlowTests(unittest.TestCase):
         self.assertEqual(model.call_count, 2)
         self.assertTrue(all(call.args[0] == chat.PLAN for call in model.call_args_list))
 
-    def test_identity_selection_rejects_a_lyric_about_the_user(self):
+    def test_empty_selection_is_not_replaced_with_a_wrong_person_candidate(self):
         with closing(self.bot.connect()) as db, db:
             app.write_song(db, app.SongInput(title="名", author="作者", lyrics=["お前に名前はない。"] ))
         def model(system, *_):
             if system == chat.PLAN:
                 return {"intent": "chat", "tone": "neutral", "reply_goal": "回答机器人的称呼", "directions": [["名前"]]}
-            return {"target": "assistant", "check": "你没有名字，描述的是用户",
-                    "choices": [{"id": 1, "count": 1, "subject": "user"}]}
+            return {"check": "你没有名字，描述的是用户", "choices": []}
         result = self.bot.reply("你叫什么名字？", model=model)
         self.assertEqual((result["status"], result["fragments"]), ("no_match", []))
 

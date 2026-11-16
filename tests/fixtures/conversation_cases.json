@@ -1,0 +1,133 @@
+[
+  {
+    "name": "relationship_after_rejected_comfort",
+    "history": [
+      {
+        "role": "user",
+        "text": "我们来演一段剧情：我问你刚才聊天的女孩和你是什么关系。"
+      },
+      {
+        "role": "assistant",
+        "text": "君のそばにいる。"
+      }
+    ],
+    "message": "我不要安慰，告诉我她和你是什么关系！",
+    "lyrics": [
+      {
+        "text": "君のそばにいる。",
+        "translation": "我在你的身边。"
+      },
+      {
+        "text": "彼女はただの友達だ。",
+        "translation": "她只是我的朋友。"
+      },
+      {
+        "text": "ただの友達なの？",
+        "translation": "只是朋友吗？"
+      }
+    ],
+    "expected": [
+      "彼女はただの友達だ。"
+    ]
+  },
+  {
+    "name": "followup_names_the_recipient",
+    "history": [
+      {
+        "role": "user",
+        "text": "剧情继续，你有什么话想说？"
+      },
+      {
+        "role": "assistant",
+        "text": "伝えたいことがある。でも言えない。"
+      }
+    ],
+    "message": "你是对谁说不出口，是我还是她？说清楚对象。",
+    "lyrics": [
+      {
+        "text": "伝えたいことがある。でも言えない。",
+        "translation": "有想传达的话，但是说不出口。"
+      },
+      {
+        "text": "君に言えなかった。",
+        "translation": "没能对你说出口。"
+      },
+      {
+        "text": "何も聞かないで。",
+        "translation": "什么都别问。"
+      }
+    ],
+    "expected": [
+      "君に言えなかった。"
+    ],
+    "optional": [
+      "何も聞かないで。"
+    ]
+  },
+  {
+    "name": "four_questions_need_four_complementary_passages",
+    "history": [
+      {
+        "role": "user",
+        "text": "继续剧情，我拿着刀追问你和那个女生的事情。"
+      },
+      {
+        "role": "assistant",
+        "text": "誤解しないで。"
+      }
+    ],
+    "message": "用歌词分别说清楚：她和你是什么关系、你们聊了什么、你喜欢谁、希望我怎么做。",
+    "lyrics": [
+      {
+        "text": "彼女はただの友達だ。",
+        "translation": "她只是我的朋友。"
+      },
+      {
+        "text": "音楽の話をしていた。",
+        "translation": "刚才在聊音乐。"
+      },
+      {
+        "text": "僕が好きなのは君だけだ。",
+        "translation": "我喜欢的只有你。"
+      },
+      {
+        "text": "その刃を下ろして。",
+        "translation": "放下那把刀。"
+      }
+    ],
+    "expected": [
+      "彼女はただの友達だ。",
+      "音楽の話をしていた。",
+      "僕が好きなのは君だけだ。",
+      "その刃を下ろして。"
+    ]
+  },
+  {
+    "name": "explicit_repeat_preserves_the_previous_quote",
+    "history": [
+      {
+        "role": "user",
+        "text": "你会陪着我吗？"
+      },
+      {
+        "role": "assistant",
+        "text": "僕はここにいる。"
+      }
+    ],
+    "message": "把你上一句原样再说一遍。",
+    "repeat": true,
+    "lyrics": [
+      {
+        "text": "僕はここにいる。",
+        "translation": "我就在这里。"
+      },
+      {
+        "text": "君もここにいる？",
+        "translation": "你也在这里吗？"
+      }
+    ],
+    "expected": [
+      "僕はここにいる。"
+    ]
+  }
+]
