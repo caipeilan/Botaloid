@@ -5,8 +5,8 @@
 <h1 align="center">Botaloid</h1>
 
 <p align="center">
-  用曲库里的歌词原文来聊天吧！回复也好，接龙、找歌、推荐更是不在话下！<br>
-  支持本地网页使用或接入社交平台账号、群聊或网站。
+  基于 RAG 的歌词回复聊天机器人。聊天与接龙直接引用曲库歌词原文，找歌与推荐返回曲目信息及歌词摘录。<br>
+  自带本地 Web 界面，并提供 HTTP API 与 Python 接口供接入各类聊天平台。
 </p>
 
 <p align="center">
@@ -20,12 +20,17 @@
 </p>
 
 <p align="center">
-  <sub>回答引用曲库原句，并标注曲名、署名与出处。</sub>
+  <sub>聊天与接龙引用曲库原词并标注出处，找歌与推荐返回曲目信息及歌词摘录。</sub>
 </p>
+
+> [!NOTE]
+> 这是一个个人向的玩具项目，开源主要是为了公开代码，后续大概率不再维护。
+> 仓库本身未内置版权歌词数据（仅附自写的示例文件）。检索使用通用的字符 1–3 gram 与 SQLite FTS5，歌词分句与跨行合并包含日语规则，配套的抓取与清洗脚本也是围绕作者自己的术力口歌单编写的；你也可以通过标准 JSON 导入任意语种的歌词库。
 
 ## 目录
 
 - [快速开始](#快速开始)
+- [模型与部署配置](#模型与部署配置)
 - [接入账号、群聊或网站](#接入账号群聊或网站)
 - [导入自己的数据](#导入自己的数据)
 - [数据与版权](#数据与版权)
@@ -36,7 +41,7 @@
 
 需要 Python 3.11+，以下命令均在项目根目录运行。
 
-### 1. 安装
+### 1. 安装依赖
 
 Windows PowerShell：
 
@@ -52,182 +57,119 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
 
-后续命令以 Windows 为例，Linux / macOS 需将 `.\.venv\Scripts\python` 替换成 `.venv/bin/python`。
+后续命令以 Windows 为例，Linux / macOS 将 `.\.venv\Scripts\python` 替换为 `.venv/bin/python` 即可。
 
-### 2. 准备歌词数据
+### 2. 导入示例曲库并启动
 
-你可以直接用作者的[超小众5000+曲目术力口歌单](https://music.163.com/playlist?id=8285082830) 生成曲库，首次生成约1.5小时。下面三条命令依次完成获取、清洗和导入：
+先用仓库自带的示例文件生成曲库，几秒内即可跑通：
+
+```powershell
+.\.venv\Scripts\python -m tools.import_lyrics tools/example_lyrics.json --database botaloid.sqlite3
+.\.venv\Scripts\python -m uvicorn app:app --host 127.0.0.1 --port 8765 --no-proxy-headers
+```
+
+启动后访问 `http://127.0.0.1:8765/`：
+1. **免模型验证**：直接在聊天框发送 `查歌词：哈基米哦南北绿豆`，无需配置模型即可看到检索回复。
+2. **配置模型聊天**：打开 `http://127.0.0.1:8765/settings`，进入「设置 → 模型设置」填好模型接口并保存，即可回到聊天页体验完整对话。
+
+服务默认读取项目根目录下的 `botaloid.sqlite3`（可通过环境变量 `BOTALOID_DB` 修改）。Web 首次启动时会等待索引就绪；运行期间在管理页编辑歌词或译文后会在后台异步重建并切换，不中断当前聊天。如果需要提前建好索引再启动，可运行 `.\.venv\Scripts\python -m botaloid.prepare_index botaloid.sqlite3`。
+
+### 3. 准备完整曲库（可选）
+
+除了自己准备 JSON 导入外，也可以直接用作者的[超小众5000+曲目术力口歌单](https://music.163.com/playlist?id=8285082830)生成曲库（首次完整抓取和构建约需 1.5 小时）。
+
+由于 `import_lyrics` 是追加写入，建议导入到独立的库文件（避免把上一步的示例曲目和示例兜底句混进正式曲库），再用 `BOTALOID_DB` 指向它；或者先删除示例阶段生成的 `botaloid.sqlite3` 再导入：
 
 ```powershell
 .\.venv\Scripts\python -m tools.fetch_playlist 8285082830 --output data/raw.sqlite3
 .\.venv\Scripts\python -m tools.clean_lyrics data/raw.sqlite3 --output data/lyrics.json
-.\.venv\Scripts\python -m tools.import_lyrics data/lyrics.json --database botaloid.sqlite3
-```
-
-`tools.fetch_playlist`仅能读取网易云歌单，`tools.clean_lyrics`同理，其按作者的歌单整理，二者皆仅为该歌单而编写。
-
-想用自己的歌词，按[导入自己的数据](#导入自己的数据)准备 JSON 后导入。
-
-**获取、清洗和导入工具的说明**
-
-<details>
-<summary>展开查看</summary>
-
-| 工具 | 作用 | 输出 |
-| --- | --- | --- |
-| `tools.fetch_playlist` | 从网易云音乐歌单获取曲名、署名、版本信息、歌词及已有译文 | 原始 SQLite 文件 |
-| `tools.clean_lyrics` | **按作者歌单整理**，清理歌词、整理署名、去重及筛选版本 | 歌词 JSON、清洗报告 |
-| `tools.import_lyrics` | 校验 JSON，并导入 Botaloid 曲库 | 可供机器人使用的 SQLite 曲库 |
-
-```mermaid
-flowchart LR
-  A["作者的网易云歌单"] -->|"tools.fetch_playlist"| B[("raw.sqlite3")]
-  B -->|"tools.clean_lyrics"| C["lyrics.json"]
-  C -->|"tools.import_lyrics"| D[("botaloid.sqlite3")]
-  D --> E["网页 / HTTP / Python"]
-```
-
-获取工具仅用于网易云平台，且：
-
-- 支持普通歌单链接、带 `#/playlist?id=...` 的链接和数字 ID。
-- 默认每秒发起 1 次请求，可用 `--rate` 调整请求速率。
-- 中断或请求失败后，重新运行相同命令会继续未完成的部分。
-- 不同歌单应使用不同的原始数据文件。
-
-清洗工具会结合曲名、署名、专辑、原曲引用、歌词指纹和相似度来处理重复及 Remix、翻唱等歌曲版本。无法确定原版时才会保留对应版本，并在报告中标为 `review_alternate`。
-
-- `data/lyrics.json` 可以在本地的管理页中通过「导入 JSON」进行导入。
-- `data/lyrics.tsv` 用于记录排除理由、保留版本和待复核项。
-- [tools/cleaning_rules.json](tools/cleaning_rules.json) 是脚本清洗完毕后，作者人工进行的修订。可编辑或通过 `--rules` 指定另一份文件；空数组 `[]` 表示不使用人工修订；按 `original_title` 标记的原版关系排除翻唱和 Remix。
-- 还有获取失败或未完成的歌曲时，清洗会提示先完成获取。无歌词和纯音乐会跳过。JSON 输出文件已存在时，清洗工具会拒绝覆盖，重新导出请换一个文件名。
-
-命令行导入则会跳过曲名、署名及逐行内容完全相同的已有曲目，保留已有曲目的启用状态。
-
-导入以单个事务执行，出错会撤销本批写入。生成的数据默认保存在 `data/` 中。
-
-</details>
-
-### 3. 本地运行
-
-```powershell
+.\.venv\Scripts\python -m tools.import_lyrics data/lyrics.json --database data/full.sqlite3
+$env:BOTALOID_DB = "data/full.sqlite3"
 .\.venv\Scripts\python -m uvicorn app:app --host 127.0.0.1 --port 8765 --no-proxy-headers
 ```
 
-之后打开[聊天界面](http://127.0.0.1:8765/)，设置页见[设置](http://127.0.0.1:8765/settings)。
-
-> [!NOTE]
-> 默认曲库是项目根目录下的 `botaloid.sqlite3`，也可用 `BOTALOID_DB` 指定路径。
->
-> 网页启动时准备曲库快照与配套索引；首次缺少可用索引时需等待构建完成。运行期间编辑歌词或译文后，系统在后台准备待发布快照及其索引，聊天继续使用服务中的快照，准备完成后统一切换。也可以在启动前运行 `.\.venv\Scripts\python -m botaloid.prepare_index botaloid.sqlite3`，将最后一个参数换成实际曲库路径。
-
-设置页可查看、编辑、启用或停用曲目，也可手动新增歌曲。
-
-**有关索引的详细信息**
-
 <details>
-<summary>展开查看</summary>
+<summary>数据处理工具补充说明</summary>
 
-检索索引位于曲库旁的 `<曲库文件名>.botaloid-index/search-v1-<generation>-<token>.sqlite3`。它保存规范化的整曲原文、字符 1–3 gram 倒排索引和全库 IDF。词表按总词频保留至多 100000 项。多个字符特征组合查询时对完整倒排表计分，避免高频特征的候选截断漏掉综合得分较高的歌词；单特征查询在可保证结果完整时使用高权重命中表。
-
-曲库内容的修订号由 `botaloid_lyric_revision` 表与写入触发器维护，用于核对歌词数据与索引是否匹配。网页在索引目录的 `published/` 下保存配套的曲库快照和索引，由后台子进程准备待发布快照，完成后统一切换。进行中的请求持有开始处理时的快照，切换后在最后一个读者结束时回收已停用的快照；构建失败时继续使用服务中的快照，并在曲库管理页显示状态。曲目启停、歌名和作者实时读取，歌曲身份标记防止删除后复用 ID 导致歌词与出处错配。索引目录不可写时，网页可在系统临时目录准备快照和索引。
-
-原文精确查询支持跨行匹配。找歌或找歌词时，如果原文精确匹配未命中、未指定上下句等相对位置，且规范化后的线索至少有 3 个字符，支持 FTS5 trigram 的 SQLite 会对原文和译文做子串检索。需要近似匹配时使用字符倒排索引。命中译文时引用对应的歌词原文。
-
-`找歌：原文片段`、`查歌词：原文片段` 唯一匹配且无待解析的作者或曲名条件时，以及有已核验出处的 `下一句`、`上一句`、`前后文`，可直接查询而不调用模型。
-
-索引目录可以从曲库重新生成。
+- `tools.fetch_playlist` 仅支持网易云音乐歌单（接受歌单链接或数字 ID），默认每秒 1 次请求（可用 `--rate` 调整）。中断后可用同一个原始 SQLite 文件断点续传，前提是歌单里的曲目和顺序未发生变化。
+- `tools.clean_lyrics` 是专门按作者歌单整理的清洗脚本，结合 [tools/cleaning_rules.json](tools/cleaning_rules.json) 处理署名、去重及过滤翻唱/Remix。`--rules` 接收 JSON 文件路径；若要停用人工规则，可新建一个内容为 `[]` 的文件并传入（如 `--rules empty-rules.json`）。默认会同步输出同名 `.tsv` 清洗报告（也可用 `--report` 指定路径）。
+- `tools.import_lyrics` 校验并写入 SQLite 曲库，自动跳过曲名、署名及逐行段号/原文/译文/兜底标记完全一致的已有曲目，并保留其启停状态。
 
 </details>
 
-### 4. 更换模型
+## 模型与部署配置
 
-进入「设置 → 模型设置」以配置模型信息。保存后下一轮聊天使用新设置。
+进入 Web 界面的「设置 → 模型设置」即可配置模型，保存后下一轮对话生效。
 
-#### OpenAI 兼容接口
+### 模型要求与接口支持
 
-适用于远程 API、LM Studio、llama.cpp、vLLM 等。填写接口地址、模型名和 API Key。地址支持主机、`/v1` 基址或完整 `/chat/completions`。
+Botaloid 的普通聊天通常会经过**规划检索词 → 检索候选 → 选句/兜底校验**流程（不合适时自动换方向重规划，仍无结果时再尝试保底歌词），因此：
+1. **模型必须能稳定输出符合要求的 JSON**。
+2. 单次用户输入可能触发多次模型调用，响应延迟和 token 消耗会高于普通单轮对话。
 
-模型列表：`POST /api/model-settings/models`，body `{provider, url, api_key, clear_key}`。未传 `api_key` 时，若 URL 与已保存配置一致则使用已保存的 Key。远程地址发送 Key 强制 HTTPS（loopback 除外）。上游非 200 或返回格式不兼容时返回 502，detail 区分重定向、401/403/404/429/5xx 与格式不兼容；连接超时 4s、读取 6s，禁用重定向。
-
-#### Ollama
-
-先在 Ollama 安装模型，填写本地地址并选择模型。地址默认补全 `/api/chat`，可读取已安装模型。
+支持的接入方式：
+- **OpenAI 兼容接口**：适用于官方 API、中转站、LM Studio、llama.cpp、vLLM 等。填写接口地址（支持主机地址、`/v1` 或完整 `/chat/completions`）、模型名和 API Key。在网页录入并保存非本机地址的 API Key 时，强制要求 HTTPS。
+- **Ollama**：填写本地地址（默认补全 `/api/chat`）并选择已安装模型即可。
 
 > [!IMPORTANT]
-> 模型需要能按要求输出 JSON。API Key 保存在系统凭据存储，模型地址、参数与曲库语言保存在本地 `model-settings.json`。
+> API Key 默认保存在系统凭据存储（keyring）中，其余配置保存在本地 `model-settings.json`。
+> 在**无桌面环境的 Linux 服务器或 Docker 容器**中通常没有可用的 keyring 服务，建议直接用环境变量启动：将 `BOTALOID_SETTINGS_FILE` 指向一个尚未存在的配置文件路径，并配置 `BOTALOID_MODEL_URL`、`BOTALOID_MODEL` 和 `BOTALOID_API_KEY`（环境变量配置不触发网页端的 HTTPS 强制校验）。如果之后在网页修改并保存了其他参数，只要保持接口地址不变且 API Key 留空，配置文件就会继续沿用 `BOTALOID_API_KEY`。也可以改用安装 `keyrings.alt` 并设置 `PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring`（明文存储，注意文件权限）。
 
-> [!NOTE]
-> 无桌面环境可能没有可用的系统凭据存储。可设置 `BOTALOID_API_KEY`，或安装 `keyrings.alt` 并设置 `PYTHON_KEYRING_BACKEND=keyrings.alt.file.PlaintextKeyring`（明文，注意文件权限）；环境变量要设置在运行 uvicorn 的进程中。
+### 曲库语言设置
 
-#### 曲库语言
+模型在规划检索词时会参考「设置 → 模型设置 → 曲库语言」的配置（支持中英文名称或 ISO 代码，多语言用逗号或分号分隔）：
+- **原文语言**（默认 `日语`）：歌词原文使用的语言。
+- **翻译语言**（默认 `中文`）：已有译文使用的语言。译文会参与检索并辅助模型选句，最终回复仍引用歌词原文。
 
-在「曲库语言」中填写歌词原文和译文使用的语言，以辅助模型用来生成检索词：
+### 环境变量与管理页权限（无头部署必看）
 
-| 设置 | 默认 | 作用 |
-| --- | --- | --- |
-| 原文语言 | 日语 | 歌词原文可能使用的语言 |
-| 翻译语言 | 中文 | 已有译文可能使用的语言 |
-
-两个字段皆支持多语言，用逗号或分号分隔；可填中文名、英文名或 ISO 代码，例如 `日语, 英语`、`Japanese, English` 或 `ja, en`。
-
-**更多详细信息**
-
-<details>
-<summary>展开查看</summary>
-
-模型调用分为规划和选句两个阶段。选句阶段先判断候选能否自然回应；候选只有关键词或意象重合、需要补出原句没有的意思时，可以退回整批候选。系统将失败方向和具体原因交给规划阶段，最多换两次方向；仍未选出时，根据上下文生成表达做不到、不知道、没找到、拒绝或安抚等态度的检索词，在符合条件的曲库中寻找保底歌词。四轮的剩余回退额度依次为 3、2、1、0，提前进入保底时直接归零。零额度时停止重新规划；全库保底仍未选出时，仅尝试人工标记的兜底歌词，最终无合适结果则返回 `no_match`。各轮均按原句含义、描述对象和明确条件判断。首轮成功即返回，完整流程最多四次规划、五次选句。
-
-最终回复由程序按候选编号和所选连续范围提取并核对歌词原文与出处。歌词可以用于直答、比喻、反问、拒绝或安抚；模型生成的自由文本、译文和改写内容不会作为回复。用户指定歌词语言时，由模型在选句阶段判断语言要求，程序核验原文及出处。系统不向用户索要补充信息；仍无可用结果时返回 `no_match`。
-
-普通聊天及其保底回复按表达需要选择一个或多个歌词片段，成功回复至少包含一段，不设固定段数上限。片段可来自同一首歌的不同位置或多首歌曲，按回复顺序逐段署名；相同或重叠的歌词位置会去重。每个候选可从指定短句开始截取连续范围，跳过残缺开头，最多连续引用四个短句，实际可选段数以本轮检索候选为界，普通聊天目前每轮最多提供 16 段候选。
-
-网页按实际阶段显示等待信息，完成后一次性追加回复。已发出的回复不提供重生成或候选挑选；切换对话会保存用户自己输入的草稿。
-
-高级参数如下（留空时使用默认值）：
-
-| 参数 | 默认行为 |
-| --- | --- |
-| 温度 | 规划 0.2，选句 0.55；填写后同时覆盖两个阶段 |
-| 最大输出 token | Ollama 规划 320、选句 220；兼容接口不主动限制；填写后同时覆盖两个阶段 |
-| 读取超时 | 默认 75 秒；网页各轮规划和选句共用本轮剩余等待预算，换方向不重置预算；剩余时间较少时提前进入保底检索 |
-| 上下文长度 | Ollama 使用 8192 |
-| 允许模型先思考 | Ollama 默认关闭 |
-| 推理强度 | 兼容接口默认不发送；可选 `none`、`minimal`、`low`、`medium`、`high`（OpenAI/OpenRouter 风格） |
-| 请求 JSON 模式 | 兼容接口默认开启 |
-
-`finish_reason=length` / `done_reason=length`、`finish_reason=content_filter`、仅返回 reasoning、无法解析为 JSON、任务字段无效或选句给出的编号全部无效时，`/api/chat` 返回 503，`detail` 说明原因。接口、超时或格式错误直接结束请求；没有合适候选时按换方向与保底流程继续检索。最终回复只发送一次。开启 INFO 日志可查看尝试轮次、模型调用次数、各阶段与锁等待耗时，以及接口返回的 token 用量。
-
-服务器也可以通过环境变量提供初始配置：
+在 VPS、Docker 或反代环境中，可通过环境变量提供初始模型配置并限制管理路由访问：
 
 | 环境变量 | 作用 |
 | --- | --- |
-| `BOTALOID_MODEL_URL` | 模型接口地址；以 `/api/chat` 结尾时使用 Ollama 原生接口，其余使用 OpenAI 兼容接口 |
-| `BOTALOID_MODEL` | 模型名 |
-| `BOTALOID_API_KEY` | 模型服务密钥 |
-| `BOTALOID_SETTINGS_FILE` | 模型配置文件位置；文件不存在时读取环境变量 |
-| `BOTALOID_DB` | 曲库 SQLite 文件位置 |
-| `BOTALOID_ADMIN=0` | 关闭管理页面和管理接口，保留聊天功能 |
-| `BOTALOID_ADMIN_HOSTS` | 允许访问管理页的 Host，逗号分隔；默认本机地址与 localhost |
-| `BOTALOID_ADMIN_NETWORKS` | 允许访问管理页的客户端 IP/CIDR，逗号分隔；默认仅 loopback |
+| `BOTALOID_DB` | 曲库 SQLite 文件路径（默认 `botaloid.sqlite3`） |
+| `BOTALOID_SETTINGS_FILE` | 模型配置文件路径（默认 `model-settings.json`）；文件存在时地址与模型名以文件为准 |
+| `BOTALOID_MODEL_URL` | 模型接口地址；以 `/api/chat` 结尾时走 Ollama 原生接口，其余走 OpenAI 兼容接口 |
+| `BOTALOID_MODEL` | 模型名称 |
+| `BOTALOID_API_KEY` | 模型 API Key（仅当配置处于环境变量引用模式且地址与 `BOTALOID_MODEL_URL` 一致时生效） |
+| `BOTALOID_ADMIN=0` | 关闭管理页面与管理接口，仅保留聊天网页与聊天 API（**对外暴露服务时建议开启**） |
+| `BOTALOID_ADMIN_HOSTS` | 允许访问管理页的 `Host` 白名单，逗号分隔（默认本机与 `localhost`） |
+| `BOTALOID_ADMIN_NETWORKS` | 允许访问管理页的客户端 IP/CIDR，逗号分隔（默认仅 loopback） |
 
-管理路由同时校验客户端 IP（`BOTALOID_ADMIN_NETWORKS`，默认 loopback）和 Host（`BOTALOID_ADMIN_HOSTS`），任一不匹配返回 403；POST/PUT/PATCH 额外校验 Origin。局域网访问时两项都要配置，例如：
+管理路由会同时校验客户端 IP 和 `Host`，带 `Origin` 的 `POST`/`PUT`/`PATCH` 还须同源。如果需要在局域网内访问管理页，需要 `export` 上述两项变量并让 Uvicorn 监听内网可达的地址（例如 `--host 0.0.0.0` 或内网 IP，本地直连时保留 `--no-proxy-headers` 以按真实连接 IP 校验）：
 
 ```sh
-BOTALOID_ADMIN_NETWORKS=192.168.1.0/24
-BOTALOID_ADMIN_HOSTS=192.168.1.10,server.local
+export BOTALOID_ADMIN_NETWORKS=192.168.1.0/24
+export BOTALOID_ADMIN_HOSTS=192.168.1.10,server.local
+.venv/bin/python -m uvicorn app:app --host 192.168.1.10 --port 8765 --no-proxy-headers
 ```
 
-配置文件存在时优先读取文件；文件不存在时读取环境变量。服务器或容器等没有系统凭据存储的环境，可以设置 `BOTALOID_MODEL_URL`、`BOTALOID_MODEL`，需要时再设置 `BOTALOID_API_KEY`，并将 `BOTALOID_SETTINGS_FILE` 指向尚不存在的配置文件路径。通过设置页保存配置后，后续请求优先使用该文件。
+<details>
+<summary>模型高级参数与内置快捷指令说明</summary>
+
+- **免模型快捷查询**：对于唯一命中的 `找歌：原文片段`、`查歌词：原文片段`（无待消歧的作者/曲名条件），以及已有核验出处的 `下一句`、`上一句`、`前后文`，会直接查库返回，不调用模型。
+- **高级参数默认值**（设置页留空即用默认）：
+  - **温度**：规划阶段 `0.2`，选句阶段 `0.55`（填写后同时覆盖两阶段）。
+  - **最大输出 token**：Ollama 默认规划 `512`、选句 `1024`；OpenAI 兼容接口默认省略该参数，由上游决定。
+  - **读取超时**：Web 端每轮默认共用 `75` 秒预算，临近超时会提前转入保底检索。
+  - **Ollama 上下文长度**：默认 `8192`；「允许模型先思考再作答」默认关闭。
+  - **兼容接口推理参数**：「请求 JSON 模式」默认开启；「推理强度」默认不发送（可选 `none`、`minimal`、`low`、`medium`、`high`）。
+- 请求失败、超时、模型输出被截断或无法解析时，`/api/chat` 返回 HTTP `503`。开启 INFO 日志可查看每轮耗时与上游返回的 `usage` token 统计。
 
 </details>
 
 ## 接入账号、群聊或网站
 
-### HTTP 接入
+### 1. HTTP 接口接入
 
-启动服务后，从接入方后端调用 `POST /api/chat`：
+> [!WARNING]
+> 对公网暴露服务时，务必设置 `BOTALOID_ADMIN=0`，并在前端反代层做好鉴权与限流。
+> 服务默认未开启 CORS，**请从接入方后端调用**（不要直接从第三方网站的前端页面跨域请求）。
+
+#### 标准请求：`POST /api/chat`
 
 ```javascript
+// 从接入方后端调用
 const response = await fetch("http://127.0.0.1:8765/api/chat", {
   method: "POST",
   headers: {"Content-Type": "application/json"},
@@ -241,93 +183,173 @@ const result = await response.json();
 console.log(result);
 ```
 
-每个私聊、群或话题各自保存一份 `history` 和 `tone`；同一段会话按顺序调用。
+接入多个私聊或群聊时，请按会话各自维护 `history` 和 `tone`，并确保同一会话按顺序串行调用。
 
-需要等待状态时，可改用 `POST /api/chat/events`，请求格式相同，返回逐行 JSON（`application/x-ndjson`）。`stage` 事件包含 `planning`、`retrieving`、`selecting`、`validating`，换方向时为 `replanning`，保底规划时为 `fallback`，人工兜底选句时为 `curated`。阶段可随检索轮次重复，等待期间可能收到 `keepalive`；最后仅有一次 `result`（包含完整返回对象）或 `error`（包含 `detail`）。HTTP 参数校验失败返回 `422`。
+#### 多轮上下文示例（`查歌词` → `下一句`）
 
-> [!WARNING]
-> 对外部署时设置 `BOTALOID_ADMIN=0`，由代理层负责鉴权和限流。
+要把「下一句 / 接龙」等上下文核验接起来，**写入 `assistant` 历史中的 `text` 必须是首轮返回的原始歌词 `fragments[].text`**，不能把拼接了曲名、作者的展示文本填进去，否则核验会失效并退回模型规划。
 
-### Python 接入
+第一轮请求：
 
-单独嵌入 Python 应用时，在项目根目录运行 `python -m pip install .` 安装核心库。核心库只依赖 Pydantic。创建 `LyricBot` 时传入曲库路径，以及由接入方提供的模型调用函数 `call_model`。
+```json
+{
+  "message": "查歌词：哈基米哦南北绿豆",
+  "history": [],
+  "tone": "neutral"
+}
+```
 
-以下示例复用网页「模型设置」中保存的配置。请先通过 `requirements.txt` 安装完整项目依赖，再在项目根目录运行。
+第一轮返回：
+
+```json
+{
+  "status": "ok",
+  "intent": "find_lyrics",
+  "fragments": [
+    {
+      "text": "哈基米哦南北绿豆",
+      "title": "我是示例",
+      "author": "自写示例",
+      "song_id": 1,
+      "source": {"song_id": 1, "start": 0, "end": 0}
+    }
+  ],
+  "tone": "neutral"
+}
+```
+
+第二轮请求（将首轮 `fragments[0].text` 与 `source` 原样写入 `history`）：
+
+```json
+{
+  "message": "下一句",
+  "history": [
+    {"role": "user", "text": "查歌词：哈基米哦南北绿豆"},
+    {
+      "role": "assistant",
+      "text": "哈基米哦南北绿豆",
+      "intent": "find_lyrics",
+      "song_ids": [1],
+      "source": {"song_id": 1, "start": 0, "end": 0}
+    }
+  ],
+  "tone": "neutral"
+}
+```
+
+第二轮预期返回（同样不经过模型，直接返回下一句）：
+
+```json
+{
+  "status": "ok",
+  "intent": "find_lyrics",
+  "fragments": [
+    {
+      "text": "阿西嘎哈压库奶龙",
+      "title": "我是示例",
+      "author": "自写示例",
+      "song_id": 1,
+      "source": {"song_id": 1, "start": 1, "end": 1}
+    }
+  ],
+  "tone": "neutral"
+}
+```
+
+#### 流式进度事件：`POST /api/chat/events`
+
+如果机器人前端需要展示当前处理阶段，可改用 `/api/chat/events`。请求体相同，返回 `application/x-ndjson`（逐行 JSON）：
+- 过程事件为 `stage`（包含 `planning`、`retrieving`、`selecting`、`validating`、`replanning`、`fallback`、`curated`）或 `keepalive`。
+- 流结束时仅发送一次 `result`（完整返回对象）或 `error`（包含 `detail`）。
+
+请求参数校验失败时两个接口均返回 `422`；模型或索引异常在 `/api/chat` 中返回 `503`，在事件流中通过 `error` 事件传递。
+
+### 2. Python 直接嵌入
+
+如果不想起 HTTP 服务，可以在项目根目录运行 `python -m pip install .` 安装核心包 `botaloid`（核心包仅有一个直接运行时依赖 `pydantic>=2,<3`）。下面的独立示例复用快速开始生成的 `botaloid.sqlite3` 演示免模型查歌词；真正进行自由聊天时，在 `call_model` 中接入你的模型即可：
+
+```python
+from botaloid import LyricBot, ModelError
+
+def call_model(system: str, prompt: str, temperature: float, schema: dict) -> dict:
+    # 自由聊天、找歌或推荐时在这里调用你的模型，并返回解析后的 JSON dict
+    raise ModelError("请先在 call_model 中接入模型")
+
+bot = LyricBot("botaloid.sqlite3", call_model)
+bot.initialize()
+result = bot.reply("查歌词：哈基米哦南北绿豆", history=[], tone="neutral")
+print(result)
+```
+
+如果你是在仓库内运行且已安装 `requirements.txt`，也可以直接复用 Web 版「模型设置」保存的模型连接来跑完整对话：
 
 ```python
 from botaloid import LyricBot
 from model_settings import active_connection, request_model
 
 connection = active_connection()
-
-def call_model(system, prompt, temperature, schema):
-    return request_model(connection, system, prompt, temperature, schema)
-
-bot = LyricBot("botaloid.sqlite3", call_model)
+bot = LyricBot(
+    "botaloid.sqlite3",
+    lambda system, prompt, temperature, schema: request_model(
+        connection, system, prompt, temperature, schema
+    ),
+)
 bot.initialize()
 result = bot.reply("你好", history=[], tone="neutral")
 print(result)
 ```
 
-单独嵌入其他应用时，提供自己的 `call_model(system, prompt, temperature, schema)` 同步函数：将前两个参数分别作为系统消息和用户消息发送给模型，返回解析后的 JSON `dict`；`schema` 可供支持结构化输出的模型使用。模型故障可以抛出 `botaloid.ModelError`。
+嵌入自有框架的要点：
+- **`call_model(system, prompt, temperature, schema)`**：需为同步函数，接收系统提示词、用户提示词、温度及 JSON Schema，返回解析后的 `dict`；模型调用异常可抛出 `botaloid.ModelError`。
+- **异步机器人框架（如 NoneBot / python-telegram-bot / discord.py）**：`bot.reply()` 是同步方法，请用 `asyncio.to_thread` 放到工作线程中执行。
+- **可选参数**：`reply()` 支持传入 `history_limit`（0～100，默认 6）、`original_languages`、`translation_languages`、`progress` 回调以及 `deadline`（`time.monotonic()` 绝对截止时间，建议在 `call_model` 内据此设置超时）。
+- **只读部署与后台热更新**：
+  - 只读曲库部署时，先执行 `python -m botaloid.prepare_index botaloid.sqlite3`，将数据库连同旁边的 `botaloid.sqlite3.botaloid-index/` 目录一起部署，再分两步初始化（`initialize()` 返回 `None`，请先保留实例）：
+    ```python
+    bot = LyricBot("botaloid.sqlite3", call_model, read_only=True)
+    bot.initialize()
+    ```
+    索引缺失或不匹配会抛出 `botaloid.SearchIndexError`。
+  - 需要在运行期间后台异步重建并切换快照时，可在 `bot.initialize()` 后使用 `botaloid.library.ServingLibrary(bot)`（依次调用 `start()`、`reply()`、退出时 `close()`）。
 
-`reply()` 是同步方法，在异步机器人框架中可用工作线程调用。使用 `bot.initialize()` 初始化曲库后，歌词变更会在下次检索时自动刷新索引。
+### 3. 请求与返回结构说明
 
-服务器 bot 可以对准备发布的独立曲库副本预建索引。
+Python 与 HTTP 接口共用同一套数据结构。
 
-```sh
-python -m botaloid.prepare_index botaloid.sqlite3
-```
+**请求字段：**
 
-部署时，将曲库和命令输出的索引文件一起复制，并保留下面的目录结构。
-
-```text
-botaloid.sqlite3
-botaloid.sqlite3.botaloid-index/
-└── search-v1-<generation>-<token>.sqlite3
-```
-
-服务中使用 `LyricBot("botaloid.sqlite3", call_model, read_only=True)` 创建实例，再调用 `initialize()`。缺少可用索引或索引版本与曲库不匹配时，会抛出 `botaloid.SearchIndexError`。更新曲库时，先为新曲库预建索引，再把两者一起部署。
-
-`reply()` 还接受可选的 `original_languages` 和 `translation_languages`，用于告诉模型曲库语言；不传时使用空配置。网页端会从「模型设置 → 曲库语言」自动传入。
-
-`reply()` 的可选参数 `history_limit` 控制使用最近多少条历史消息，接受 0～100 的整数，默认 6；例如 `bot.reply("你好", history=history, history_limit=20)`。用户消息和助手回复各计 1 条，设为 0 时不使用历史消息。HTTP 聊天服务自动读取「模型设置」中保存的历史消息条数。
-
-需要阶段通知时，传入 `progress(stage)` 回调。`reply()` 还接受 `deadline`，值为 `time.monotonic()` 时钟上的绝对截止时间，用于检查剩余等待预算；接入方提供的模型调用函数也应据此设置网络请求超时。单独使用 `LyricBot` 时，歌词变更会在下一次相关查询中同步触发索引重建。需要后台构建并发布曲库快照时，先调用 `bot.initialize()` 初始化曲库，再创建 `ServingLibrary(bot)`（位于 `botaloid.library`），调用 `start()`、`reply()`，并在退出时调用 `close()`。使用只读曲库前，运行 `python -m botaloid.prepare_index botaloid.sqlite3` 准备索引与发布元数据。
-
-### 请求与返回
-
-Python 和 HTTP 使用相同的数据结构：
-
-| 请求字段 | 内容 |
+| 字段 | 说明 |
 | --- | --- |
 | `message` | 当前用户消息，1～1000 字符 |
-| `history` | 最多 100 条近期消息，按时间从早到晚排列；每条包含 `role`（`user` 或 `assistant`）和 `text`（最多 1000 字符），实际使用最近配置条数的消息 |
-| `tone` | 上一轮返回的语气；新会话使用 `neutral` |
+| `history` | 按时间从早到晚排列的历史记录（最多传 100 条，单条 `text` 最多 1000 字符；实际按 `history_limit` 取末尾最近几条，默认 6 条，传给模型时每条文本最多截断至 350 字符） |
+| `tone` | 上一轮返回的 `tone`；新会话传 `"neutral"` |
 
+> [!TIP]
+> **拼接 `history` 时的关键字段**：每条历史必须包含 `role`（`user` / `assistant`）和 `text`（写入原始歌词而非拼装后的展示文本）。为了保证接龙、指代上一轮歌曲和延续筛选条件正常，写入 `assistant` 历史时，建议从上一轮返回结果中带上：
+> - `intent`、`conditions`（如有）以及末项的 `source`（包含 `revision` 时原样保留）。
+> - `song_ids`：由接入方从上一轮返回的 `songs[].id` 或 `fragments[].song_id` 按出现顺序去重后组装。
+> - 若上一轮为保底回复，还应带上 `fallback` 和 `requested_intent`。
 
-助手历史还可包含 `intent`、`song_ids`、末段的 `source` 和返回的 `conditions`，用于接龙、曲目指代及筛选条件的延续。`song_ids` 应包含回复涉及的全部曲目，按首次出现的顺序去重；后续可指代第四首及以后的曲目，编号按上一轮实际曲目列表核验。保底回复另将 `fallback` 和 `requested_intent` 随助手历史回传，使模型理解该歌词用于保底接话。`tone` 作为下一次请求的顶层字段回传。历史消息按配置条数从最近的消息开始截取，默认 6 条；每条传给模型的历史文本最多保留 350 字符。增大条数会增加输入 token 用量，实际可用长度受模型上下文窗口限制。
+**返回字段：**
 
-| 返回字段 | 内容 |
+| 字段 | 说明 |
 | --- | --- |
-| `intent` | `chat` 聊天、`sing_along` 接龙、`find_song` 找歌、`find_lyrics` 找歌词、`recommend` 推荐 |
-| `fragments` | 歌词原文 `text`、曲名 `title`、署名 `author` 和 `song_id`；定位到曲内位置时附 `source` |
-| `songs` | 曲目 `id`、`title`、`author`；有相关原文时附 `excerpt` 和 `source` |
-| `source`（片段内） | `song_id`、`start`、`end`，表示曲内短句序列的位置，从 0 开始，包含 `end`；网页发布器另附曲库内容修订标记 `revision`，快照变化后按原文重新核对位置 |
-| `conditions` | 可选，原始需求已解析的 `title`、`author` 和 `directions`，随助手历史回传以延续筛选条件 |
-| `fallback` | 保底成功时出现，值为 `true`，表示此片段通过保底流程选出 |
-| `requested_intent` | 保底前的原始需求意图，与 `fallback` 一同回传助手历史 |
-| `status` | `ok` 有原文或曲目结果，保底成功也为 `ok`；`no_match` 无可用结果；`ended` 已核验唱到曲末 |
-| `ended` | 仅 `status` 为 `ended` 时出现，值为 `true` |
-| `tone` | 本轮语气，传回同一段对话以延续态度 |
-
-HTTP 参数校验失败时返回 `422`。模型调用失败、输出截断或无法解析，以及检索抛出 `SearchIndexError` 时，`/api/chat` 返回 `503`，`detail` 说明原因。`/api/chat/events` 开始返回事件流后，运行错误通过终止事件 `error` 传递，接入方应检查事件内容。
+| `status` | `ok`（成功返回原文或曲目，含保底成功）、`no_match`（无可用结果）、`ended`（接龙已唱到曲末） |
+| `intent` | `chat`（聊天）、`sing_along`（接龙）、`find_song`（找歌）、`find_lyrics`（找歌词）、`recommend`（推荐） |
+| `fragments` | 选中的歌词片段列表，含原文 `text`、曲名 `title`、署名 `author`、`song_id`，定位到曲内位置时附 `source` |
+| `songs` | 推荐或找歌时的曲目列表，含 `id`、`title`、`author`，有摘录时附 `excerpt` 与 `source` |
+| `source` | 曲内定位 `{song_id, start, end}`（短句下标从 0 开始，闭区间；Web 发布器会附加 `revision`） |
+| `conditions` | 可选，已解析的筛选条件（`title`、`author`、`directions`） |
+| `fallback` | 保底成功时为 `true` |
+| `requested_intent` | 触发保底前的原始 `intent` |
+| `ended` | 仅 `status == "ended"` 时为 `true` |
+| `tone` | 本轮语气，下一轮请求原样传回 |
 
 ## 导入自己的数据
 
 ### JSON 格式
 
-使用 UTF-8 编码，最外层是歌曲数组。可直接参考或导入自写的 [example_lyrics.json](tools/example_lyrics.json)。以下两种歌词写法都支持，也可以在一首歌中混用：
+使用 UTF-8 编码，最外层为歌曲数组（单批最多 10000 首，可参考 [tools/example_lyrics.json](tools/example_lyrics.json)）。`lyrics` 支持纯字符串或对象，也可以混用：
 
 ```json
 [
@@ -351,49 +373,41 @@ HTTP 参数校验失败时返回 `422`。模型调用失败、输出截断或无
 | 字段 | 要求 |
 | --- | --- |
 | `title` | 必填，曲名，1～500 字符 |
-| `author` | 必填，署名，1～500 字符；可将作者、演唱者等用 ` / ` 合并 |
-| `enabled` | 可选，默认 `true`；停用曲目不会参与回复 |
-| `lyrics` | 必填，1～3000 行，每行可以是字符串或对象 |
+| `author` | 必填，署名，1～500 字符（多个创作者/歌手建议用 ` / ` 合并） |
+| `enabled` | 可选，默认 `true`；设为 `false` 的曲目不会参与回复 |
+| `lyrics` | 必填，1～3000 行 |
 | `lyrics[].text` | 对象写法的歌词原文，1～1800 字符 |
-| `lyrics[].stanza` | 可选，默认 0；0～3000 的整数，按出现顺序不得递减 |
-| `lyrics[].translation` | 可选，最多 1800 字符，译文仅参与检索，回复依旧使用原文 |
-| `lyrics[].fallback` | 可选，默认 `false`；标记人工兜底歌词。系统优先在符合条件的曲库中检索保底歌词，仍未选出时才使用这些标记，并由模型判断是否贴切；优先选择近期未用的句子，没有未用候选时允许重复 |
-
-字符串写法等价于 stanza 为 0 的对象。混用时也要保持段落顺序。一次最多导入 10000 首；曲目 ID 由曲库生成，JSON 中无需填写来源链接或平台 ID。
+| `lyrics[].stanza` | 可选，默认 `0`（0～3000 的整数）；同一首歌内按出现顺序不得递减 |
+| `lyrics[].translation` | 可选，最多 1800 字符；参与检索与辅助选句，最终回复仍使用原文 |
+| `lyrics[].fallback` | 可选，默认 `false`；标记为人工兜底句（普通检索与全库保底检索都未选中时才从中挑选） |
 
 ### 导入方式
 
-- **管理页**：进入「设置 → 曲库管理 → 导入 JSON」，选择文件。少量歌曲也可用「新增歌曲」手动录入。
-- **命令行**：使用与管理页相同的 JSON 格式，导入前无需启动网页服务：
+- **Web 管理页**：进入「设置 → 曲库管理 → 导入 JSON」上传（少量歌曲也可在页面手动「新增歌曲」）。该方式会逐首新增曲目。
+- **命令行**（无需启动 Web 服务；会跳过曲名、署名及逐行段号/原文/译文/兜底标记完全相同的已有曲目，并保留其启停状态）：
 
 ```powershell
 .\.venv\Scripts\python -m tools.import_lyrics "自己的歌词.json" --database botaloid.sqlite3
 ```
 
-两种方式都向现有曲库追加数据。管理页每次都会新增曲目；命令行会跳过完全相同的已有记录。相同曲名但内容不同的记录仍会导入，可随后在曲库管理中复核和停用。
-
 ## 数据与版权
 
 > [!WARNING]
-> 歌词和译文的权利归各自权利人；工具代码的许可不包含对第三方内容的授权。采集、导入及后续使用应符合相应授权、平台规则和适用法律。
+> 本项目仅包含程序代码与自写的简短示例，完整曲库需由使用者自行生成或导入。歌词和译文的版权归各自权利人所有，代码许可证不涵盖对第三方内容的授权；采集、导入及部署使用请自行遵守对应平台规则与适用法律。
 
-工具由使用者在本地运行，原始数据、导出歌词和曲库文件保存在使用者选择的位置。获取依赖平台接口，接口及可获取范围可能变化。
-
-代码许可见[许可证](#许可证)；随附字体按其自身许可证使用。
+抓取、清洗与导入脚本均在本地运行，数据文件保存在本地路径；平台抓取工具依赖第三方接口，不保证长期可用。随附字体按其自身许可证使用。
 
 ## 上游与感谢
 
-- [FastAPI](https://fastapi.tiangolo.com/)、[Pydantic](https://docs.pydantic.dev/)、[Uvicorn](https://www.uvicorn.org/)：HTTP 服务和数据校验。
-- [SQLite](https://www.sqlite.org/) 提供曲库存储、字符倒排索引和 FTS5 子串检索。
-- [Requests](https://requests.readthedocs.io/)、[keyring](https://github.com/jaraco/keyring)：模型与数据请求、系统凭据存储。
-- [Ollama](https://ollama.com/) 及 OpenAI 兼容接口的模型服务。
+- [FastAPI](https://fastapi.tiangolo.com/)、[Pydantic](https://docs.pydantic.dev/)、[Uvicorn](https://www.uvicorn.org/)：HTTP 服务与数据校验。
+- [SQLite](https://www.sqlite.org/)：曲库存储与倒排 / FTS5 检索支持。
+- [Requests](https://requests.readthedocs.io/)、[keyring](https://github.com/jaraco/keyring)：网络请求与系统凭据存储。
+- [Ollama](https://ollama.com/) 及各类 OpenAI 兼容模型服务。
 - [小赖等宽](https://github.com/lxgw/kose-font/releases/tag/v3.126)：本地界面字体，许可证见 [OFL-Xiaolai.txt](web/assets/fonts/OFL-Xiaolai.txt)。
 - 感谢 [bilibili @Richardn2002](https://space.bilibili.com/213997744) 提供的数据建议和使用反馈。
 
-感谢原作者、演唱者和歌词及译文的贡献者。
+感谢所有词曲作者、演唱者及歌词与译文的整理贡献者。
 
 ## 许可证
 
-本项目代码以 [MIT 许可证](LICENSE) 发布。
-
-歌词、译文等第三方内容不在该许可范围内，详见[数据与版权](#数据与版权)。
+本项目代码基于 [MIT 许可证](LICENSE) 开源；歌词、译文等第三方内容不在该许可范围内。
